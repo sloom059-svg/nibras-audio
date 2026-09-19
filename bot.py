@@ -39,21 +39,25 @@ def upload(file,vid):
     if r.status_code not in (200,201):raise RuntimeError(f"GitHub upload {r.status_code}: {r.text[:800]}")
     return "uploaded"
 
+def ytdlp_base():
+    # Node.js is installed in Docker so yt-dlp can solve modern YouTube player challenges.
+    return ["yt-dlp", "--js-runtimes", "node", "--remote-components", "ejs:github"]
+
 def entries(url):
-    out=run(["yt-dlp","--flat-playlist","--ignore-errors","--print","%(id)s|%(webpage_url)s",url])
+    out=run(ytdlp_base()+["--flat-playlist","--ignore-errors","--print","%(id)s|%(webpage_url)s",url])
     a=[]
     for x in out.splitlines():
         if "|" in x:
             vid,page=x.split("|",1)
             if vid.strip():a.append((vid.strip(),page.strip() or f"https://www.youtube.com/watch?v={vid.strip()}"))
     if not a:
-        vid=run(["yt-dlp","--no-playlist","--print","%(id)s",url]).strip().splitlines()[0];a=[(vid,url)]
+        vid=run(ytdlp_base()+["--no-playlist","--print","%(id)s",url]).strip().splitlines()[0];a=[(vid,url)]
     return a
 
 def one(vid,url):
     _,_,old=gh_info(vid)
     if old:return "skipped"
-    run(["yt-dlp","--no-playlist","-x","--audio-format","wav","-o",str(D/"%(id)s.%(ext)s"),url])
+    run(ytdlp_base()+["--no-playlist","-x","--audio-format","wav","-o",str(D/"%(id)s.%(ext)s"),url])
     wav=D/f"{vid}.wav"
     run(["python","-m","demucs","--two-stems=vocals","-n","htdemucs","-o",str(S),str(wav)])
     cand=list(S.glob(f"**/{vid}/vocals.wav"))
