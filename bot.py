@@ -150,6 +150,18 @@ def one_uploaded(vid, file_path):
         for p in S.glob(f"**/{vid}"):
             if p.is_dir():shutil.rmtree(p,ignore_errors=True)
 
+def publish_uploaded(vid, file_path):
+    _,_,old=gh_info(vid)
+    if old:return "skipped"
+    source=Path(file_path)
+    final=O/f"{vid}.m4a"
+    try:
+        run(["ffmpeg","-y","-i",str(source),"-vn","-c:a","aac","-b:a","128k",str(final)])
+        return upload(final,vid)
+    finally:
+        try:final.unlink()
+        except:pass
+
 def process_all(url):
     if not TOKEN or "/" not in REPO:raise RuntimeError("أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables")
     es=entries(url); up=[]; skip=[]; fail=[]
@@ -180,6 +192,30 @@ def proc_direct():
         return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
     except Exception as e:
         return jsonify(ok=False,error=str(e)),500
+
+@app.post("/publish-audio-ui")
+def publish_audio_ui():
+    if not JOB_LOCK.acquire(blocking=False):
+        return jsonify(ok=False,error="هناك عملية أخرى جارية، حاول بعد انتهائها"),429
+    source=None
+    try:
+        vid=re.sub(r"[^A-Za-z0-9_-]","",str(request.form.get("id","")).strip())
+        incoming=request.files.get("file")
+        if not vid or incoming is None or not incoming.filename:
+            return jsonify(ok=False,error="أرسل id وملفًا باسم file"),400
+        if not TOKEN or "/" not in REPO:
+            return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
+        source=D/f"{vid}.clean"
+        incoming.save(source)
+        status=publish_uploaded(vid,source)
+        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),500
+    finally:
+        if source is not None:
+            try:source.unlink()
+            except:pass
+        JOB_LOCK.release()
 
 @app.post("/process-upload-ui")
 def proc_upload_ui():
