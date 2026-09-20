@@ -3,3 +3,4 @@ requests>=2.32.0
 yt-dlp
 demucs
 gunicorn==23.0.0
+yt-dlp-ejs

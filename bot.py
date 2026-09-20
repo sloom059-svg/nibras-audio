@@ -40,8 +40,19 @@ def upload(file,vid):
     return "uploaded"
 
 def ytdlp_base():
-    # Node.js is installed in Docker so yt-dlp can solve modern YouTube player challenges.
-    return ["yt-dlp", "--js-runtimes", "node", "--remote-components", "ejs:github"]
+    # YouTube now requires yt-dlp-ejs plus an explicit JavaScript runtime.
+    node = shutil.which("node") or shutil.which("nodejs")
+    if not node:
+        raise RuntimeError("Node.js runtime is unavailable in the container")
+    return [
+        "yt-dlp",
+        "--js-runtimes", f"node:{node}",
+        "--remote-components", "ejs:github",
+        "--extractor-args", "youtube:player_client=android_vr,web_safari,web_embedded",
+        "--retries", "5",
+        "--fragment-retries", "5",
+        "--sleep-requests", "1",
+    ]
 
 def entries(url):
     out=run(ytdlp_base()+["--flat-playlist","--ignore-errors","--print","%(id)s|%(webpage_url)s",url])
