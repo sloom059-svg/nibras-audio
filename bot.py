@@ -9,7 +9,9 @@ TOKEN=os.getenv("GITHUB_TOKEN","").strip()
 REPO=os.getenv("GITHUB_REPO","").strip()
 BRANCH=os.getenv("GITHUB_BRANCH","main").strip()
 FOLDER=os.getenv("GITHUB_FOLDER","audio").strip().strip("/")
+UPLOAD_KEY=os.getenv("UPLOAD_KEY","").strip()
 app=Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"]=512*1024*1024
 HTML="""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
 <style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}input,button{padding:14px;font-size:17px;border:0;border-radius:10px}input{width:90%;margin:12px 0}button{cursor:pointer}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}</style>
 <div class=c><h2>نبراس | إزالة الموسيقى</h2><p>الصق رابط فيديو أو Playlist</p><input id=u placeholder="YouTube URL"><br><button onclick=go()>بدء المعالجة</button><pre id=s>جاهز</pre></div>
@@ -113,6 +115,26 @@ def one_direct(vid, source_url):
         for p in S.glob(f"**/{vid}"):
             if p.is_dir():shutil.rmtree(p,ignore_errors=True)
 
+def one_uploaded(vid, file_path):
+    _,_,old=gh_info(vid)
+    if old:return "skipped"
+    source=Path(file_path)
+    wav=D/f"{vid}.wav"
+    final=O/f"{vid}.m4a"
+    try:
+        run(["ffmpeg","-y","-i",str(source),"-ar","44100","-ac","2","-c:a","pcm_s16le",str(wav)])
+        run(["python","-m","demucs","--two-stems=vocals","-n","htdemucs","-o",str(S),str(wav)])
+        cand=list(S.glob(f"**/{vid}/vocals.wav"))
+        if not cand:raise RuntimeError("Demucs vocals output missing")
+        run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
+        return upload(final,vid)
+    finally:
+        for p in (wav,final):
+            try:p.unlink()
+            except:pass
+        for p in S.glob(f"**/{vid}"):
+            if p.is_dir():shutil.rmtree(p,ignore_errors=True)
+
 def process_all(url):
     if not TOKEN or "/" not in REPO:raise RuntimeError("أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables")
     es=entries(url); up=[]; skip=[]; fail=[]
@@ -143,6 +165,27 @@ def proc_direct():
         return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
     except Exception as e:
         return jsonify(ok=False,error=str(e)),500
+
+@app.post("/process-upload")
+def proc_upload():
+    if UPLOAD_KEY and request.headers.get("X-Upload-Key","") != UPLOAD_KEY:
+        return jsonify(ok=False,error="مفتاح الرفع غير صحيح"),401
+    vid=re.sub(r"[^A-Za-z0-9_-]","",str(request.form.get("id","")).strip())
+    incoming=request.files.get("file")
+    if not vid or incoming is None or not incoming.filename:
+        return jsonify(ok=False,error="أرسل id وملفًا باسم file"),400
+    if not TOKEN or "/" not in REPO:
+        return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
+    source=D/f"{vid}.source"
+    try:
+        incoming.save(source)
+        status=one_uploaded(vid,source)
+        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),500
+    finally:
+        try:source.unlink()
+        except:pass
 
 @app.post("/process")
 def proc():
