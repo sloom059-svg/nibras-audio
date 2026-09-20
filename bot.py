@@ -82,6 +82,37 @@ def one(vid,url):
         if p.is_dir():shutil.rmtree(p,ignore_errors=True)
     return status
 
+def one_direct(vid, source_url):
+    _,_,old=gh_info(vid)
+    if old:return "skipped"
+    source=D/f"{vid}.m4a"
+    wav=D/f"{vid}.wav"
+    final=O/f"{vid}.m4a"
+    try:
+        with requests.get(
+            source_url,
+            headers={"User-Agent":"Mozilla/5.0"},
+            stream=True,
+            timeout=(30,180),
+        ) as r:
+            r.raise_for_status()
+            with source.open("wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+        run(["ffmpeg","-y","-i",str(source),"-ar","44100","-ac","2","-c:a","pcm_s16le",str(wav)])
+        run(["python","-m","demucs","--two-stems=vocals","-n","htdemucs","-o",str(S),str(wav)])
+        cand=list(S.glob(f"**/{vid}/vocals.wav"))
+        if not cand:raise RuntimeError("Demucs vocals output missing")
+        run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
+        return upload(final,vid)
+    finally:
+        for p in (source,wav,final):
+            try:p.unlink()
+            except:pass
+        for p in S.glob(f"**/{vid}"):
+            if p.is_dir():shutil.rmtree(p,ignore_errors=True)
+
 def process_all(url):
     if not TOKEN or "/" not in REPO:raise RuntimeError("أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables")
     es=entries(url); up=[]; skip=[]; fail=[]
@@ -98,6 +129,21 @@ def process_all(url):
 def home():return render_template_string(HTML)
 @app.get("/health")
 def health():return {"ok":True}
+@app.post("/process-direct")
+def proc_direct():
+    d=request.get_json(silent=True) or {}
+    vid=re.sub(r"[^A-Za-z0-9_-]","",str(d.get("id","")).strip())
+    source=(d.get("source_url") or "").strip()
+    if not vid or not re.match(r"^https?://",source):
+        return jsonify(ok=False,error="معرّف أو رابط بث غير صحيح"),400
+    if not TOKEN or "/" not in REPO:
+        return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
+    try:
+        status=one_direct(vid,source)
+        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),500
+
 @app.post("/process")
 def proc():
     u=(request.get_json(silent=True) or {}).get("url","").strip()
