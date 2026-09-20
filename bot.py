@@ -1,4 +1,4 @@
-import os, re, base64, shutil, subprocess
+import os, re, base64, shutil, subprocess, threading
 from pathlib import Path
 import requests
 from flask import Flask, request, render_template_string, jsonify
@@ -12,10 +12,25 @@ FOLDER=os.getenv("GITHUB_FOLDER","audio").strip().strip("/")
 UPLOAD_KEY=os.getenv("UPLOAD_KEY","").strip()
 app=Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"]=512*1024*1024
+JOB_LOCK=threading.Lock()
 HTML="""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
-<style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}input,button{padding:14px;font-size:17px;border:0;border-radius:10px}input{width:90%;margin:12px 0}button{cursor:pointer}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}</style>
-<div class=c><h2>نبراس | إزالة الموسيقى</h2><p>الصق رابط فيديو أو Playlist</p><input id=u placeholder="YouTube URL"><br><button onclick=go()>بدء المعالجة</button><pre id=s>جاهز</pre></div>
-<script>async function go(){s.textContent="⏳ جاري المعالجة...";let r=await fetch("/process",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u.value})});let d=await r.json();s.textContent=d.ok?d.message:"❌ "+d.error}</script></html>"""
+<style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}input,button{padding:14px;font-size:17px;border:0;border-radius:10px}input{width:90%;margin:12px 0}button{cursor:pointer}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}.hint{color:#bbb;font-size:14px}</style>
+<div class=c><h2>نبراس | إزالة الموسيقى</h2><p>ضع رابط YouTube للمطابقة، وأرفق الفيديو/الصوت إذا طلب YouTube تسجيل الدخول.</p><input id="u" placeholder="YouTube URL"><br><input id="f" type="file" accept="audio/*,video/*"><p class="hint">الرابط يحدد مكان الملف في الكتالوج، والملف المرفق هو مصدر المعالجة.</p><button onclick="go()">بدء المعالجة</button><pre id="s">جاهز</pre></div>
+<script>
+function getId(raw){try{const x=new URL(raw);if(x.hostname==="youtu.be")return x.pathname.slice(1).split("/")[0];if(x.searchParams.get("v"))return x.searchParams.get("v");const m=x.pathname.match(/\/(?:shorts|embed|live)\/([^/?]+)/);return m?m[1]:""}catch(e){return""}}
+async function go(){
+ const url=document.getElementById("u").value.trim(), file=document.getElementById("f").files[0], s=document.getElementById("s"), id=getId(url);
+ if(!id){s.textContent="❌ ضع رابط YouTube صحيحًا للمطابقة";return}
+ s.textContent=file?"⏳ جاري رفع الملف وفصل الصوت...":"⏳ جاري السحب والمعالجة...";
+ try{
+  let r;
+  if(file){const fd=new FormData();fd.append("id",id);fd.append("source_url",url);fd.append("file",file,file.name);r=await fetch("/process-upload-ui",{method:"POST",body:fd})}
+  else{r=await fetch("/process",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url})})}
+  const d=await r.json();s.textContent=d.ok?"✅ "+d.message:"❌ "+(d.error||"حدث خطأ")
+ }catch(e){s.textContent="❌ تعذر الاتصال بالخدمة"}
+}
+</script></html>"""
+
 
 def run(c):
     p=subprocess.run(c,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
@@ -165,6 +180,30 @@ def proc_direct():
         return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
     except Exception as e:
         return jsonify(ok=False,error=str(e)),500
+
+@app.post("/process-upload-ui")
+def proc_upload_ui():
+    if not JOB_LOCK.acquire(blocking=False):
+        return jsonify(ok=False,error="هناك عملية أخرى جارية، حاول بعد انتهائها"),429
+    source=None
+    try:
+        vid=re.sub(r"[^A-Za-z0-9_-]","",str(request.form.get("id","")).strip())
+        incoming=request.files.get("file")
+        if not vid or incoming is None or not incoming.filename:
+            return jsonify(ok=False,error="أرسل رابطًا وملفًا للمطابقة"),400
+        if not TOKEN or "/" not in REPO:
+            return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
+        source=D/f"{vid}.source"
+        incoming.save(source)
+        status=one_uploaded(vid,source)
+        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),500
+    finally:
+        if source is not None:
+            try:source.unlink()
+            except:pass
+        JOB_LOCK.release()
 
 @app.post("/process-upload")
 def proc_upload():
