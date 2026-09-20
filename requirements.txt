@@ -5,3 +5,4 @@ demucs
 gunicorn==23.0.0
 yt-dlp-ejs
 numpy
+diffq
