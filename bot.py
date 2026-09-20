@@ -48,7 +48,7 @@ def ytdlp_base():
         "yt-dlp",
         "--js-runtimes", f"node:{node}",
         "--remote-components", "ejs:github",
-        "--extractor-args", "youtube:player_client=android_vr,web_safari,web_embedded",
+        "--extractor-args", "youtube:player_client=android_vr",
         "--retries", "5",
         "--fragment-retries", "5",
         "--sleep-requests", "1",
