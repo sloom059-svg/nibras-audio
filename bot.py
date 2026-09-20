@@ -87,7 +87,7 @@ def one(vid,url):
     if old:return "skipped"
     run(ytdlp_base()+["--no-playlist","-x","--audio-format","wav","-o",str(D/"%(id)s.%(ext)s"),url])
     wav=D/f"{vid}.wav"
-    run(["python","-m","demucs","--two-stems=vocals","-n","htdemucs","--segment","4","-j","1","-o",str(S),str(wav)])
+    run(["python","-m","demucs","--two-stems=vocals","-n","mdx_q","--segment","4","-j","1","-o",str(S),str(wav)])
     cand=list(S.glob(f"**/{vid}/vocals.wav"))
     if not cand:raise RuntimeError("Demucs vocals output missing")
     final=O/f"{vid}.m4a"
@@ -118,7 +118,7 @@ def one_direct(vid, source_url):
                     if chunk:
                         f.write(chunk)
         run(["ffmpeg","-y","-i",str(source),"-ar","44100","-ac","2","-c:a","pcm_s16le",str(wav)])
-        run(["python","-m","demucs","--two-stems=vocals","-n","htdemucs","--segment","4","-j","1","-o",str(S),str(wav)])
+        run(["python","-m","demucs","--two-stems=vocals","-n","mdx_q","--segment","4","-j","1","-o",str(S),str(wav)])
         cand=list(S.glob(f"**/{vid}/vocals.wav"))
         if not cand:raise RuntimeError("Demucs vocals output missing")
         run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
@@ -138,7 +138,7 @@ def one_uploaded(vid, file_path):
     final=O/f"{vid}.m4a"
     try:
         run(["ffmpeg","-y","-i",str(source),"-ar","44100","-ac","2","-c:a","pcm_s16le",str(wav)])
-        run(["python","-m","demucs","--two-stems=vocals","-n","htdemucs","--segment","4","-j","1","-o",str(S),str(wav)])
+        run(["python","-m","demucs","--two-stems=vocals","-n","mdx_q","--segment","4","-j","1","-o",str(S),str(wav)])
         cand=list(S.glob(f"**/{vid}/vocals.wav"))
         if not cand:raise RuntimeError("Demucs vocals output missing")
         run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
