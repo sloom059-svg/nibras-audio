@@ -106,7 +106,7 @@ def one_uploaded(vid, source):
         log(f'{vid}: ffmpeg -> wav')
         run(['ffmpeg','-y','-i',str(source),'-vn','-ar','44100','-ac','2','-c:a','pcm_s16le',str(wav)])
         log(f'{vid}: demucs start')
-        run(['python','-m','demucs','--two-stems=vocals','-n','mdx_q','--segment','4','-j','1','-o',str(S),str(wav)])
+        run(['python','-m','demucs','--two-stems=vocals','-n','htdemucs','--segment','4','-j','1','-o',str(S),str(wav)])
         cand=list(S.glob(f'**/{vid}/vocals.wav'))
         if not cand: raise RuntimeError('Demucs vocals output missing')
         log(f'{vid}: encode m4a')
