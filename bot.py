@@ -30,11 +30,17 @@ HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta nam
 def log(msg):
     print(f'[NIBRAS] {msg}', flush=True)
 
-def run(c):
-    p=subprocess.run(c,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+def run(c, env=None):
+    merged=os.environ.copy()
+    if env: merged.update(env)
+    p=subprocess.run(c,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,env=merged)
+    out=p.stdout or ''
     if p.returncode:
-        raise RuntimeError(p.stdout[-7000:])
-    return p.stdout
+        tail=out[-12000:]
+        if p.returncode in (-9, 137):
+            raise RuntimeError(f'Process killed (code {p.returncode}) — likely memory pressure.\\n{tail}')
+        raise RuntimeError(f'Command failed (code {p.returncode}).\\n{tail}')
+    return out
 
 def headers():
     return {'Authorization':f'Bearer {TOKEN}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
@@ -106,7 +112,25 @@ def one_uploaded(vid, source):
         log(f'{vid}: ffmpeg -> wav')
         run(['ffmpeg','-y','-i',str(source),'-vn','-ar','44100','-ac','2','-c:a','pcm_s16le',str(wav)])
         log(f'{vid}: demucs start')
-        run(['python','-m','demucs','--two-stems=vocals','-n','htdemucs','--segment','4','-j','1','-o',str(S),str(wav)])
+        demucs_env={
+            'OMP_NUM_THREADS':'1',
+            'MKL_NUM_THREADS':'1',
+            'OPENBLAS_NUM_THREADS':'1',
+            'NUMEXPR_NUM_THREADS':'1',
+            'VECLIB_MAXIMUM_THREADS':'1',
+        }
+        run([
+            'python','-m','demucs',
+            '--two-stems=vocals',
+            '-n','htdemucs',
+            '--device','cpu',
+            '--segment','2',
+            '--overlap','0.05',
+            '--shifts','0',
+            '-j','1',
+            '-o',str(S),
+            str(wav)
+        ], env=demucs_env)
         cand=list(S.glob(f'**/{vid}/vocals.wav'))
         if not cand: raise RuntimeError('Demucs vocals output missing')
         log(f'{vid}: encode m4a')
