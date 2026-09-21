@@ -1,8 +1,7 @@
 Flask==3.1.2
 requests>=2.32.0
 yt-dlp
-demucs
+demucs==4.0.1
 gunicorn==23.0.0
 yt-dlp-ejs
-numpy
-diffq
+numpy<2
