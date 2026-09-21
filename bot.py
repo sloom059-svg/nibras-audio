@@ -1,272 +1,151 @@
-import os, re, base64, shutil, subprocess, threading
+import os, re, base64, shutil, subprocess, threading, json
 from pathlib import Path
+from urllib.parse import quote
 import requests
 from flask import Flask, request, render_template_string, jsonify
 
-WORK=Path("/tmp/nibras"); D=WORK/"downloads"; S=WORK/"separated"; O=WORK/"output"
+WORK=Path('/tmp/nibras'); D=WORK/'downloads'; S=WORK/'separated'; O=WORK/'output'
 for p in (D,S,O): p.mkdir(parents=True,exist_ok=True)
-TOKEN=os.getenv("GITHUB_TOKEN","").strip()
-REPO=os.getenv("GITHUB_REPO","").strip()
-BRANCH=os.getenv("GITHUB_BRANCH","main").strip()
-FOLDER=os.getenv("GITHUB_FOLDER","audio").strip().strip("/")
-UPLOAD_KEY=os.getenv("UPLOAD_KEY","").strip()
+TOKEN=os.getenv('GITHUB_TOKEN','').strip()
+REPO=os.getenv('GITHUB_REPO','').strip()
+BRANCH=os.getenv('GITHUB_BRANCH','main').strip()
+FOLDER=os.getenv('GITHUB_FOLDER','processed-audio').strip().strip('/')
+UPLOAD_KEY=os.getenv('UPLOAD_KEY','').strip()
+MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
 app=Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"]=512*1024*1024
+app.config['MAX_CONTENT_LENGTH']=512*1024*1024
 JOB_LOCK=threading.Lock()
-HTML="""<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
-<style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}input,button{padding:14px;font-size:17px;border:0;border-radius:10px}input{width:90%;margin:12px 0}button{cursor:pointer}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}.hint{color:#bbb;font-size:14px}</style>
-<div class=c><h2>نبراس | إزالة الموسيقى</h2><p>ضع رابط YouTube للمطابقة، وأرفق الفيديو/الصوت إذا طلب YouTube تسجيل الدخول.</p><input id="u" placeholder="YouTube URL"><br><input id="f" type="file" accept="audio/*,video/*"><p class="hint">الرابط يحدد مكان الملف في الكتالوج، والملف المرفق هو مصدر المعالجة.</p><button onclick="go()">بدء المعالجة</button><pre id="s">جاهز</pre></div>
-<script>
-function getId(raw){try{const x=new URL(raw);if(x.hostname==="youtu.be")return x.pathname.slice(1).split("/")[0];if(x.searchParams.get("v"))return x.searchParams.get("v");const m=x.pathname.match(/\/(?:shorts|embed|live)\/([^/?]+)/);return m?m[1]:""}catch(e){return""}}
-async function go(){
- const url=document.getElementById("u").value.trim(), file=document.getElementById("f").files[0], s=document.getElementById("s"), id=getId(url);
- if(!id){s.textContent="❌ ضع رابط YouTube صحيحًا للمطابقة";return}
- s.textContent=file?"⏳ جاري رفع الملف وفصل الصوت...":"⏳ جاري السحب والمعالجة...";
- try{
-  let r;
-  if(file){const fd=new FormData();fd.append("id",id);fd.append("source_url",url);fd.append("file",file,file.name);r=await fetch("/process-upload-ui",{method:"POST",body:fd})}
-  else{r=await fetch("/process",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url})})}
-  const d=await r.json();s.textContent=d.ok?"✅ "+d.message:"❌ "+(d.error||"حدث خطأ")
- }catch(e){s.textContent="❌ تعذر الاتصال بالخدمة"}
-}
-</script></html>"""
-
+HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
+<style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}</style>
+<div class=c><h2>نبراس | معالج الصوت</h2><p>الخدمة تستقبل الصوت من برنامج الكمبيوتر، تزيل الموسيقى، ثم ترفع الناتج وتحدّث audio-map.json.</p><pre>جاهز</pre></div></html>'''
 
 def run(c):
     p=subprocess.run(c,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
-    if p.returncode: raise RuntimeError(p.stdout[-5000:])
+    if p.returncode: raise RuntimeError(p.stdout[-7000:])
     return p.stdout
 
 def headers():
-    return {"Authorization":f"Bearer {TOKEN}","Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+    return {'Authorization':f'Bearer {TOKEN}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+
+def gh_get(path):
+    api=f'https://api.github.com/repos/{REPO}/contents/{quote(path, safe="/")}'
+    r=requests.get(api,headers=headers(),params={'ref':BRANCH},timeout=30)
+    if r.status_code==200:return api,r.json()
+    if r.status_code==404:return api,None
+    raise RuntimeError(f'GitHub check {r.status_code}: {r.text[:700]}')
 
 def gh_info(vid):
-    path=f"{FOLDER}/{vid}.m4a" if FOLDER else f"{vid}.m4a"
-    api=f"https://api.github.com/repos/{REPO}/contents/{path}"
-    r=requests.get(api,headers=headers(),params={"ref":BRANCH},timeout=30)
-    if r.status_code==200:return path,api,r.json()
-    if r.status_code==404:return path,api,None
-    raise RuntimeError(f"GitHub check {r.status_code}: {r.text[:600]}")
+    path=f'{FOLDER}/{vid}.m4a' if FOLDER else f'{vid}.m4a'
+    api,old=gh_get(path)
+    return path,api,old
+
+def raw_url(path):
+    return f'https://raw.githubusercontent.com/{REPO}/{BRANCH}/{quote(path, safe="/")}'
+
+def update_audio_map(vid, path):
+    if not TOKEN or '/' not in REPO:
+        raise RuntimeError('GitHub settings are missing')
+    api,old=gh_get(MAP_PATH)
+    mapping={}
+    sha=None
+    if old:
+        sha=old.get('sha')
+        try:
+            content=base64.b64decode(old.get('content','')).decode('utf-8')
+            obj=json.loads(content)
+            if isinstance(obj,dict): mapping=obj
+        except Exception:
+            mapping={}
+    url=raw_url(path)
+    if mapping.get(vid)==url:
+        return url
+    mapping[vid]=url
+    body={
+        'message':f'Update audio map {vid}',
+        'content':base64.b64encode((json.dumps(mapping,ensure_ascii=False,indent=2)+'\n').encode('utf-8')).decode(),
+        'branch':BRANCH,
+    }
+    if sha: body['sha']=sha
+    r=requests.put(api,headers=headers(),json=body,timeout=60)
+    if r.status_code not in (200,201):
+        raise RuntimeError(f'GitHub map update {r.status_code}: {r.text[:900]}')
+    return url
 
 def upload(file,vid):
     path,api,old=gh_info(vid)
-    if old:return "skipped"
+    if old:
+        update_audio_map(vid,path)
+        return 'skipped', raw_url(path)
     data=base64.b64encode(Path(file).read_bytes()).decode()
-    r=requests.put(api,headers=headers(),json={"message":f"Add cleaned audio {vid}","content":data,"branch":BRANCH},timeout=180)
-    if r.status_code not in (200,201):raise RuntimeError(f"GitHub upload {r.status_code}: {r.text[:800]}")
-    return "uploaded"
+    r=requests.put(api,headers=headers(),json={'message':f'Add cleaned audio {vid}','content':data,'branch':BRANCH},timeout=240)
+    if r.status_code not in (200,201):raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
+    url=update_audio_map(vid,path)
+    return 'uploaded',url
 
-def ytdlp_base():
-    # YouTube now requires yt-dlp-ejs plus an explicit JavaScript runtime.
-    node = shutil.which("node") or shutil.which("nodejs")
-    if not node:
-        raise RuntimeError("Node.js runtime is unavailable in the container")
-    return [
-        "yt-dlp",
-        "--js-runtimes", f"node:{node}",
-        "--remote-components", "ejs:github",
-        "--extractor-args", "youtube:player_client=tv_downgraded,android_vr",
-        "--retries", "5",
-        "--fragment-retries", "5",
-        "--sleep-requests", "1",
-    ]
-
-def entries(url):
-    out=run(ytdlp_base()+["--flat-playlist","--ignore-errors","--print","%(id)s|%(webpage_url)s",url])
-    a=[]
-    for x in out.splitlines():
-        if "|" in x:
-            vid,page=x.split("|",1)
-            if vid.strip():a.append((vid.strip(),page.strip() or f"https://www.youtube.com/watch?v={vid.strip()}"))
-    if not a:
-        vid=run(ytdlp_base()+["--no-playlist","--print","%(id)s",url]).strip().splitlines()[0];a=[(vid,url)]
-    return a
-
-def one(vid,url):
-    _,_,old=gh_info(vid)
-    if old:return "skipped"
-    run(ytdlp_base()+["--no-playlist","-x","--audio-format","wav","-o",str(D/"%(id)s.%(ext)s"),url])
-    wav=D/f"{vid}.wav"
-    run(["python","-m","demucs","--two-stems=vocals","-n","mdx_q","--segment","4","-j","1","-o",str(S),str(wav)])
-    cand=list(S.glob(f"**/{vid}/vocals.wav"))
-    if not cand:raise RuntimeError("Demucs vocals output missing")
-    final=O/f"{vid}.m4a"
-    run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
-    status=upload(final,vid)
-    try:wav.unlink();final.unlink()
-    except:pass
-    for p in S.glob(f"**/{vid}"):
+def cleanup_vid(vid):
+    for p in (D/f'{vid}.wav', O/f'{vid}.m4a'):
+        try:p.unlink()
+        except:pass
+    for p in S.glob(f'**/{vid}'):
         if p.is_dir():shutil.rmtree(p,ignore_errors=True)
-    return status
-
-def one_direct(vid, source_url):
-    _,_,old=gh_info(vid)
-    if old:return "skipped"
-    source=D/f"{vid}.m4a"
-    wav=D/f"{vid}.wav"
-    final=O/f"{vid}.m4a"
-    try:
-        with requests.get(
-            source_url,
-            headers={"User-Agent":"Mozilla/5.0"},
-            stream=True,
-            timeout=(30,180),
-        ) as r:
-            r.raise_for_status()
-            with source.open("wb") as f:
-                for chunk in r.iter_content(1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-        run(["ffmpeg","-y","-i",str(source),"-ar","44100","-ac","2","-c:a","pcm_s16le",str(wav)])
-        run(["python","-m","demucs","--two-stems=vocals","-n","mdx_q","--segment","4","-j","1","-o",str(S),str(wav)])
-        cand=list(S.glob(f"**/{vid}/vocals.wav"))
-        if not cand:raise RuntimeError("Demucs vocals output missing")
-        run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
-        return upload(final,vid)
-    finally:
-        for p in (source,wav,final):
-            try:p.unlink()
-            except:pass
-        for p in S.glob(f"**/{vid}"):
-            if p.is_dir():shutil.rmtree(p,ignore_errors=True)
 
 def one_uploaded(vid, file_path):
-    _,_,old=gh_info(vid)
-    if old:return "skipped"
+    path,_,old=gh_info(vid)
+    if old:
+        return 'skipped', update_audio_map(vid,path)
     source=Path(file_path)
-    wav=D/f"{vid}.wav"
-    final=O/f"{vid}.m4a"
+    wav=D/f'{vid}.wav'
+    final=O/f'{vid}.m4a'
     try:
-        run(["ffmpeg","-y","-i",str(source),"-ar","44100","-ac","2","-c:a","pcm_s16le",str(wav)])
-        run(["python","-m","demucs","--two-stems=vocals","-n","mdx_q","--segment","4","-j","1","-o",str(S),str(wav)])
-        cand=list(S.glob(f"**/{vid}/vocals.wav"))
-        if not cand:raise RuntimeError("Demucs vocals output missing")
-        run(["ffmpeg","-y","-i",str(cand[0]),"-c:a","aac","-b:a","128k",str(final)])
+        run(['ffmpeg','-y','-i',str(source),'-vn','-ar','44100','-ac','2','-c:a','pcm_s16le',str(wav)])
+        run(['python','-m','demucs','--two-stems=vocals','-n','mdx_q','--segment','4','-j','1','-o',str(S),str(wav)])
+        cand=list(S.glob(f'**/{vid}/vocals.wav'))
+        if not cand:raise RuntimeError('Demucs vocals output missing')
+        run(['ffmpeg','-y','-i',str(cand[0]),'-vn','-c:a','aac','-b:a','128k',str(final)])
+        if not final.exists() or final.stat().st_size < 10000:
+            raise RuntimeError('Final clean audio was not created correctly')
         return upload(final,vid)
     finally:
-        for p in (wav,final):
-            try:p.unlink()
-            except:pass
-        for p in S.glob(f"**/{vid}"):
-            if p.is_dir():shutil.rmtree(p,ignore_errors=True)
+        cleanup_vid(vid)
 
-def publish_uploaded(vid, file_path):
-    _,_,old=gh_info(vid)
-    if old:return "skipped"
-    source=Path(file_path)
-    final=O/f"{vid}.m4a"
-    try:
-        run(["ffmpeg","-y","-i",str(source),"-vn","-c:a","aac","-b:a","128k",str(final)])
-        return upload(final,vid)
-    finally:
-        try:final.unlink()
-        except:pass
-
-def process_all(url):
-    if not TOKEN or "/" not in REPO:raise RuntimeError("أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables")
-    es=entries(url); up=[]; skip=[]; fail=[]
-    for vid,page in es:
-        try:
-            x=one(vid,page); (up if x=="uploaded" else skip).append(vid)
-        except Exception as e:fail.append((vid,str(e)[-700:]))
-    msg=f"انتهى — الإجمالي {len(es)}\n✅ مرفوع: {len(up)}\n⏭️ موجود مسبقًا: {len(skip)}\n❌ فشل: {len(fail)}"
-    if up:msg+="\n\n"+ "\n".join(f"✅ {x}.m4a" for x in up)
-    if fail:msg+="\n\n"+ "\n".join(f"❌ {v}: {e}" for v,e in fail)
-    return msg
-
-@app.get("/")
+@app.get('/')
 def home():return render_template_string(HTML)
-@app.get("/health")
-def health():return {"ok":True}
-@app.post("/process-direct")
-def proc_direct():
-    d=request.get_json(silent=True) or {}
-    vid=re.sub(r"[^A-Za-z0-9_-]","",str(d.get("id","")).strip())
-    source=(d.get("source_url") or "").strip()
-    if not vid or not re.match(r"^https?://",source):
-        return jsonify(ok=False,error="معرّف أو رابط بث غير صحيح"),400
-    if not TOKEN or "/" not in REPO:
-        return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
-    try:
-        status=one_direct(vid,source)
-        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
-    except Exception as e:
-        return jsonify(ok=False,error=str(e)),500
 
-@app.post("/publish-audio-ui")
-def publish_audio_ui():
-    if not JOB_LOCK.acquire(blocking=False):
-        return jsonify(ok=False,error="هناك عملية أخرى جارية، حاول بعد انتهائها"),429
-    source=None
-    try:
-        vid=re.sub(r"[^A-Za-z0-9_-]","",str(request.form.get("id","")).strip())
-        incoming=request.files.get("file")
-        if not vid or incoming is None or not incoming.filename:
-            return jsonify(ok=False,error="أرسل id وملفًا باسم file"),400
-        if not TOKEN or "/" not in REPO:
-            return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
-        source=D/f"{vid}.clean"
-        incoming.save(source)
-        status=publish_uploaded(vid,source)
-        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
-    except Exception as e:
-        return jsonify(ok=False,error=str(e)),500
-    finally:
-        if source is not None:
-            try:source.unlink()
-            except:pass
-        JOB_LOCK.release()
+@app.get('/health')
+def health():
+    return {'ok':True,'service':'nibras-audio','folder':FOLDER,'map':MAP_PATH,'busy':JOB_LOCK.locked()}
 
-@app.post("/process-upload-ui")
-def proc_upload_ui():
-    if not JOB_LOCK.acquire(blocking=False):
-        return jsonify(ok=False,error="هناك عملية أخرى جارية، حاول بعد انتهائها"),429
-    source=None
-    try:
-        vid=re.sub(r"[^A-Za-z0-9_-]","",str(request.form.get("id","")).strip())
-        incoming=request.files.get("file")
-        if not vid or incoming is None or not incoming.filename:
-            return jsonify(ok=False,error="أرسل رابطًا وملفًا للمطابقة"),400
-        if not TOKEN or "/" not in REPO:
-            return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
-        source=D/f"{vid}.source"
-        incoming.save(source)
-        status=one_uploaded(vid,source)
-        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
-    except Exception as e:
-        return jsonify(ok=False,error=str(e)),500
-    finally:
-        if source is not None:
-            try:source.unlink()
-            except:pass
-        JOB_LOCK.release()
-
-@app.post("/process-upload")
+@app.post('/process-upload')
 def proc_upload():
-    if UPLOAD_KEY and request.headers.get("X-Upload-Key","") != UPLOAD_KEY:
-        return jsonify(ok=False,error="مفتاح الرفع غير صحيح"),401
-    vid=re.sub(r"[^A-Za-z0-9_-]","",str(request.form.get("id","")).strip())
-    incoming=request.files.get("file")
-    if not vid or incoming is None or not incoming.filename:
-        return jsonify(ok=False,error="أرسل id وملفًا باسم file"),400
-    if not TOKEN or "/" not in REPO:
-        return jsonify(ok=False,error="أضف GITHUB_TOKEN و GITHUB_REPO في Railway Variables"),500
-    source=D/f"{vid}.source"
+    if UPLOAD_KEY and request.headers.get('X-Upload-Key','') != UPLOAD_KEY:
+        return jsonify(ok=False,error='مفتاح الرفع غير صحيح'),401
+    if not TOKEN or '/' not in REPO:
+        return jsonify(ok=False,error='GitHub settings are missing on Railway'),500
+    if not JOB_LOCK.acquire(blocking=False):
+        return jsonify(ok=False,error='busy',message='هناك ملف آخر قيد المعالجة'),429
+    source=None
     try:
+        vid=re.sub(r'[^A-Za-z0-9_-]','',str(request.form.get('id','')).strip())
+        title=str(request.form.get('title','')).strip()[:300]
+        playlist=str(request.form.get('playlist','')).strip()[:500]
+        incoming=request.files.get('file')
+        if not vid or incoming is None or not incoming.filename:
+            return jsonify(ok=False,error='أرسل id وملفًا باسم file'),400
+        suffix=Path(incoming.filename).suffix.lower() or '.source'
+        source=D/f'{vid}{suffix}'
         incoming.save(source)
-        status=one_uploaded(vid,source)
-        return jsonify(ok=True,message=f"انتهى — {status}: {vid}.m4a")
+        status,url=one_uploaded(vid,source)
+        return jsonify(ok=True,status=status,id=vid,title=title,playlist=playlist,url=url,map=MAP_PATH,folder=FOLDER)
     except Exception as e:
         return jsonify(ok=False,error=str(e)),500
     finally:
-        try:source.unlink()
-        except:pass
+        if source is not None:
+            try:source.unlink()
+            except:pass
+        JOB_LOCK.release()
 
-@app.post("/process")
-def proc():
-    u=(request.get_json(silent=True) or {}).get("url","").strip()
-    if not re.match(r"^https?://",u):return jsonify(ok=False,error="رابط غير صحيح"),400
-    try:return jsonify(ok=True,message=process_all(u))
-    except Exception as e:return jsonify(ok=False,error=str(e)),500
+@app.post('/process-upload-ui')
+def proc_upload_ui():
+    return proc_upload()
 
-if __name__=="__main__":app.run(host="0.0.0.0",port=int(os.getenv("PORT","8080")))
+if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')))
