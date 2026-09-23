@@ -251,8 +251,8 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <small>إذا تركته فارغًا سأحاول أخذه من بداية اسم الملف.</small>
 <label>مجلد المسلسل</label><input name=series value="{{series}}" placeholder="مثال: barbear" required>
 <small>كل مسلسل يكون داخل مجلد مستقل للتنظيم، مثل audio/barbear/.</small>
-<label>ملفات الصوت الجاهزة</label><input type=file name=file accept="audio/*" multiple required>
-<small>تقدر تختار عدة ملفات دفعة واحدة. إذا أسماء الملفات تبدأ بـ Video ID مثل aJ3zGhhMuxE_... راح أربط كل ملف تلقائيًا.</small>
+<label>ملفات الصوت الجاهزة</label><input type=file name=file accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,audio/mp4,audio/x-m4a,audio/aac,audio/mpeg,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/opus" multiple required>
+<small>يدعم M4A و AAC و MP3 و WAV و FLAC و OGG و OPUS. تقدر تختار عدة ملفات دفعة واحدة. إذا أسماء الملفات تبدأ بـ Video ID مثل aJ3zGhhMuxE_... راح أربط كل ملف تلقائيًا.</small>
 <button type=submit>رفع وربط الآن</button>
 </form>
 <p style="margin-top:18px"><a style="color:#ffd982" href="/audio-status?k={{key}}">عرض حالة المقاطع المربوطة</a></p>
