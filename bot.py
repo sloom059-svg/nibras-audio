@@ -262,6 +262,14 @@ def _derive_video_id(value, filename):
     raw=re.sub(r'[^A-Za-z0-9_-]','',str(value or '').strip())
     if raw:return raw
     name=Path(filename or '').stem
+
+    # LALAL may prepend sequence numbers such as:
+    # 2-v2j0HEHwWNo_vocals...
+    # 10-LIDDzf-WLPQ_vocals...
+    # and a YouTube id itself may begin with '-' as in:
+    # 3--IhFHYf-9cQ_vocals...
+    name=re.sub(r'^\\d+-','',name)
+
     m=re.match(r'^([A-Za-z0-9_-]{11})(?:_|$)',name)
     return m.group(1) if m else ''
 
@@ -318,6 +326,8 @@ def publish_zip_file(incoming, series):
                     continue
                 original=Path(info.filename).name
                 if Path(original).suffix.lower() not in AUDIO_EXTS:
+                    continue
+                if '_no_vocals_' in original.lower():
                     continue
                 vid=_derive_video_id('',original)
                 if not vid:
