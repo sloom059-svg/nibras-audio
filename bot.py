@@ -265,7 +265,7 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
   <div class=progressTrack><div id=progressBar class=progressBar></div></div>
   <div class=progressNote id=progressNote>لا تغلق الصفحة حتى يكتمل الرفع والفحص.</div>
 </div>
-<p style="margin-top:18px"><a style="color:#ffd982" href="/audio-status?k={{key}}">عرض حالة المقاطع المربوطة</a></p>
+<p style="margin-top:18px"><a style="color:#ffd982" href="/audio-status">عرض حالة المقاطع المربوطة</a></p>
 <div id=resultBox>{{message|safe}}</div>
 </div>
 <script>
@@ -409,9 +409,7 @@ def publish_clean_file(incoming, vid, series):
 
 @app.route('/publish-clean',methods=['GET','POST'])
 def publish_clean():
-    supplied=(request.values.get('k') or '').strip()
-    if PUBLISH_KEY and supplied!=PUBLISH_KEY:
-        return 'Unauthorized',401
+    supplied=''
     vid=(request.values.get('id') or '').strip()
     series=(request.values.get('series') or '').strip()
     message=''
@@ -479,7 +477,7 @@ a{color:#ffd982}@media(max-width:650px){.grid{grid-template-columns:1fr}}
 <div class=grid><input name=playlist value="{{playlist}}" placeholder="Playlist ID أو رابط يوتيوب" required><input name=series value="{{series}}" placeholder="مجلد المسلسل، مثال barbear"></div>
 <button style="margin-top:10px;width:100%" type=submit>فحص القائمة</button></form>
 {{body|safe}}
-<p><a href="/publish-clean?k={{key}}">رجوع لرفع الملفات</a></p></div></html>'''
+<p><a href="/publish-clean">رجوع لرفع الملفات</a></p></div></html>'''
 
 def load_audio_map():
     try:
@@ -506,8 +504,7 @@ def playlist_entries(value):
 
 @app.get('/audio-status')
 def audio_status():
-    supplied=(request.args.get('k') or '').strip()
-    if PUBLISH_KEY and supplied!=PUBLISH_KEY:return 'Unauthorized',401
+    supplied=''
     value=(request.args.get('playlist') or '').strip()
     series=(request.args.get('series') or '').strip()
     body=''
