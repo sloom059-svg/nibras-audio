@@ -12,6 +12,7 @@ REPO=os.getenv('GITHUB_REPO','').strip()
 BRANCH=os.getenv('GITHUB_BRANCH','main').strip()
 FOLDER=os.getenv('GITHUB_FOLDER','processed-audio').strip().strip('/')
 UPLOAD_KEY=os.getenv('UPLOAD_KEY','').strip()
+PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
 
 app=Flask(__name__)
@@ -230,6 +231,79 @@ def enqueue_request():
     pos=JOB_QUEUE.qsize()
     log(f'{job_id} {vid}: queued size={row["size"]} position~{pos}')
     return jsonify(ok=True,status='queued',job_id=job_id,id=vid,queue_position=pos),202
+
+
+CLEAN_HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>نبراس | نشر صوت جاهز</title>
+<style>
+body{font-family:Arial;background:#15171b;color:#fff;max-width:720px;margin:30px auto;padding:18px}
+.c{background:#22262c;padding:24px;border-radius:18px}
+label{display:block;margin:14px 0 7px;font-weight:700}
+input,button{width:100%;padding:13px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:16px}
+input{background:#111;color:#fff}button{margin-top:18px;background:#f6c35f;color:#162436;font-weight:900;cursor:pointer}
+small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-top:16px}.err{background:#4b1d23;padding:12px;border-radius:10px;margin-top:16px}
+</style>
+<div class=c><h2>نبراس | نشر الصوت الجاهز</h2>
+<p>ارفع ملف LALAL الجاهز وسيُربط تلقائيًا بمعرّف فيديو YouTube داخل التطبيق.</p>
+<form method=post enctype=multipart/form-data>
+<input type=hidden name=k value="{{key}}">
+<label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="مثال: aJ3zGhhMuxE">
+<small>إذا تركته فارغًا سأحاول أخذه من بداية اسم الملف.</small>
+<label>ملف الصوت الجاهز</label><input type=file name=file accept="audio/*" required>
+<button type=submit>رفع وربط الآن</button>
+</form>
+{{message|safe}}
+</div></html>'''
+
+def _derive_video_id(value, filename):
+    raw=re.sub(r'[^A-Za-z0-9_-]','',str(value or '').strip())
+    if raw:return raw
+    name=Path(filename or '').stem
+    m=re.match(r'^([A-Za-z0-9_-]{11})(?:_|$)',name)
+    return m.group(1) if m else ''
+
+def publish_clean_file(incoming, vid):
+    suffix=Path(incoming.filename or '').suffix.lower() or '.source'
+    work=QDIR/f'clean_{uuid.uuid4().hex}_{vid}{suffix}'
+    final=O/f'{vid}.m4a'
+    incoming.save(work)
+    if not work.exists() or work.stat().st_size<1000:
+        raise RuntimeError('الملف فارغ أو غير مكتمل')
+    try:
+        # Re-wrap/re-encode to M4A for the Android player.
+        run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','160k',str(final)])
+        if not final.exists() or final.stat().st_size<10000:
+            raise RuntimeError('تعذر تجهيز ملف M4A')
+        status,url=upload(final,vid)
+        return status,url
+    finally:
+        try:work.unlink()
+        except:pass
+        try:final.unlink()
+        except:pass
+
+@app.route('/publish-clean',methods=['GET','POST'])
+def publish_clean():
+    supplied=(request.values.get('k') or '').strip()
+    if PUBLISH_KEY and supplied!=PUBLISH_KEY:
+        return 'Unauthorized',401
+    vid=(request.values.get('id') or '').strip()
+    message=''
+    if request.method=='POST':
+        incoming=request.files.get('file')
+        if incoming is None or not incoming.filename:
+            message='<div class="err">اختر ملف الصوت أولاً.</div>'
+        else:
+            vid=_derive_video_id(vid,incoming.filename)
+            if not vid:
+                message='<div class="err">تعذر معرفة معرّف الفيديو. اكتبه يدويًا.</div>'
+            else:
+                try:
+                    status,url=publish_clean_file(incoming,vid)
+                    message=f'<div class="ok">تم ✅<br>{status}<br><a style="color:#ffd982" href="{html.escape(url)}">{html.escape(url)}</a></div>'
+                except Exception as e:
+                    message='<div class="err">'+html.escape(str(e))+'</div>'
+    return render_template_string(CLEAN_HTML,key=supplied,vid=html.escape(vid),message=message)
 
 @app.get('/')
 def home():return render_template_string(HTML)
