@@ -249,10 +249,13 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <input type=hidden name=k value="{{key}}">
 <label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="مثال: aJ3zGhhMuxE">
 <small>إذا تركته فارغًا سأحاول أخذه من بداية اسم الملف.</small>
+<label>مجلد المسلسل</label><input name=series value="{{series}}" placeholder="مثال: barbear" required>
+<small>كل مسلسل يكون داخل مجلد مستقل للتنظيم، مثل audio/barbear/.</small>
 <label>ملفات الصوت الجاهزة</label><input type=file name=file accept="audio/*" multiple required>
 <small>تقدر تختار عدة ملفات دفعة واحدة. إذا أسماء الملفات تبدأ بـ Video ID مثل aJ3zGhhMuxE_... راح أربط كل ملف تلقائيًا.</small>
 <button type=submit>رفع وربط الآن</button>
 </form>
+<p style="margin-top:18px"><a style="color:#ffd982" href="/audio-status?k={{key}}">عرض حالة المقاطع المربوطة</a></p>
 {{message|safe}}
 </div></html>'''
 
@@ -263,7 +266,23 @@ def _derive_video_id(value, filename):
     m=re.match(r'^([A-Za-z0-9_-]{11})(?:_|$)',name)
     return m.group(1) if m else ''
 
-def publish_clean_file(incoming, vid):
+def series_slug(value):
+    value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
+    return value or 'general'
+
+def upload_series(file,vid,series):
+    folder=series_slug(series)
+    path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
+    api,old=gh_get(path)
+    if old:
+        return 'skipped', update_audio_map(vid,path)
+    data=base64.b64encode(Path(file).read_bytes()).decode()
+    r=requests.put(api,headers=headers(),json={'message':f'Add cleaned audio {folder}/{vid}','content':data,'branch':BRANCH},timeout=240)
+    if r.status_code not in (200,201):
+        raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
+    return 'uploaded', update_audio_map(vid,path)
+
+def publish_clean_file(incoming, vid, series):
     suffix=Path(incoming.filename or '').suffix.lower() or '.source'
     work=QDIR/f'clean_{uuid.uuid4().hex}_{vid}{suffix}'
     final=O/f'{vid}.m4a'
@@ -281,7 +300,7 @@ def publish_clean_file(incoming, vid):
             run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','192k',str(final)])
         if not final.exists() or final.stat().st_size<10000:
             raise RuntimeError('تعذر تجهيز ملف M4A')
-        status,url=upload(final,vid)
+        status,url=upload_series(final,vid,series)
         return status,url
     finally:
         try:work.unlink()
@@ -295,6 +314,7 @@ def publish_clean():
     if PUBLISH_KEY and supplied!=PUBLISH_KEY:
         return 'Unauthorized',401
     vid=(request.values.get('id') or '').strip()
+    series=(request.values.get('series') or '').strip()
     message=''
     if request.method=='POST':
         files=[x for x in request.files.getlist('file') if x and x.filename]
@@ -309,7 +329,7 @@ def publish_clean():
                     errors.append(f'{incoming.filename}: تعذر معرفة Video ID من اسم الملف')
                     continue
                 try:
-                    status,url=publish_clean_file(incoming,this_vid)
+                    status,url=publish_clean_file(incoming,this_vid,series)
                     results.append((incoming.filename,this_vid,status,url))
                 except Exception as e:
                     errors.append(f'{incoming.filename}: {str(e)}')
@@ -323,7 +343,76 @@ def publish_clean():
             if errors:
                 parts.append('<div class="err">'+ '<br>'.join(html.escape(x) for x in errors) +'</div>')
             message=''.join(parts)
-    return render_template_string(CLEAN_HTML,key=supplied,vid=html.escape(vid),message=message)
+    return render_template_string(CLEAN_HTML,key=supplied,vid=html.escape(vid),series=html.escape(series),message=message)
+
+
+STATUS_HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>نبراس | حالة الصوت</title>
+<style>
+body{font-family:Arial;background:#15171b;color:#fff;max-width:920px;margin:30px auto;padding:18px}.c{background:#22262c;padding:24px;border-radius:18px}
+input,button{padding:12px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:15px}input{background:#111;color:#fff}button{background:#f6c35f;color:#162436;font-weight:900;cursor:pointer}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.sum{background:#111;padding:14px;border-radius:12px;margin:16px 0}
+table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #3a3d43;text-align:right}.yes{color:#8fda9b}.no{color:#ff9790}.mono{font-family:monospace;direction:ltr;text-align:left}
+a{color:#ffd982}@media(max-width:650px){.grid{grid-template-columns:1fr}}
+</style>
+<div class=c><h2>حالة المقاطع المربوطة بالصوت</h2>
+<form method=get><input type=hidden name=k value="{{key}}">
+<div class=grid><input name=playlist value="{{playlist}}" placeholder="Playlist ID أو رابط يوتيوب" required><input name=series value="{{series}}" placeholder="مجلد المسلسل، مثال barbear"></div>
+<button style="margin-top:10px;width:100%" type=submit>فحص القائمة</button></form>
+{{body|safe}}
+<p><a href="/publish-clean?k={{key}}">رجوع لرفع الملفات</a></p></div></html>'''
+
+def load_audio_map():
+    try:
+        _,old=gh_get(MAP_PATH)
+        if not old:return {}
+        raw=base64.b64decode(old.get('content','')).decode('utf-8')
+        obj=json.loads(raw)
+        return obj if isinstance(obj,dict) else {}
+    except Exception:
+        return {}
+
+def playlist_id(value):
+    value=str(value or '').strip()
+    m=re.search(r'[?&]list=([A-Za-z0-9_-]+)',value)
+    return m.group(1) if m else re.sub(r'[^A-Za-z0-9_-]','',value)
+
+def playlist_entries(value):
+    pid=playlist_id(value)
+    if not pid:return []
+    url=f'https://www.youtube.com/playlist?list={pid}'
+    out=run(['yt-dlp','--flat-playlist','--dump-single-json','--no-warnings',url])
+    obj=json.loads(out)
+    return [{'id':str(x.get('id') or ''),'title':str(x.get('title') or '')} for x in (obj.get('entries') or []) if x and x.get('id')]
+
+@app.get('/audio-status')
+def audio_status():
+    supplied=(request.args.get('k') or '').strip()
+    if PUBLISH_KEY and supplied!=PUBLISH_KEY:return 'Unauthorized',401
+    value=(request.args.get('playlist') or '').strip()
+    series=(request.args.get('series') or '').strip()
+    body=''
+    if value:
+        try:
+            entries=playlist_entries(value)
+            mapping=load_audio_map()
+            linked=[]
+            for x in entries:
+                url=mapping.get(x['id'],'')
+                ok=bool(url)
+                if series:
+                    folder='/' + series_slug(series) + '/'
+                    ok=ok and folder in url
+                linked.append((x,ok,url))
+            count=sum(1 for _,ok,_ in linked if ok)
+            rows=''.join(
+                '<tr><td>'+html.escape(x['title'] or 'بدون عنوان')+'</td><td class="mono">'+html.escape(x['id'])+'</td><td class="'+('yes' if ok else 'no')+'">'+('✅ مربوط' if ok else '❌ غير مربوط')+'</td></tr>'
+                for x,ok,_ in linked
+            )
+            body=f'<div class="sum"><b>{count}</b> من <b>{len(linked)}</b> مقطع مربوط بالصوت النظيف.</div><div style="overflow:auto"><table><thead><tr><th>المقطع</th><th>Video ID</th><th>الحالة</th></tr></thead><tbody>{rows}</tbody></table></div>'
+        except Exception as e:
+            body='<div class="sum no">تعذر فحص القائمة: '+html.escape(str(e))+'</div>'
+    return render_template_string(STATUS_HTML,key=supplied,playlist=html.escape(value),series=html.escape(series),body=body)
 
 @app.get('/')
 def home():return render_template_string(HTML)
