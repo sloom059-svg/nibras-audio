@@ -270,8 +270,14 @@ def publish_clean_file(incoming, vid):
     if not work.exists() or work.stat().st_size<1000:
         raise RuntimeError('الملف فارغ أو غير مكتمل')
     try:
-        # Re-wrap/re-encode to M4A for the Android player.
-        run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','160k',str(final)])
+        # Preserve LALAL audio quality: if the uploaded file is AAC, only re-wrap
+        # it inside an M4A container without re-encoding. For other formats, fall
+        # back to AAC encoding for Android compatibility.
+        probe=run(['ffprobe','-v','error','-select_streams','a:0','-show_entries','stream=codec_name','-of','default=noprint_wrappers=1:nokey=1',str(work)]).strip().lower()
+        if probe=='aac':
+            run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','copy',str(final)])
+        else:
+            run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','192k',str(final)])
         if not final.exists() or final.stat().st_size<10000:
             raise RuntimeError('تعذر تجهيز ملف M4A')
         status,url=upload(final,vid)
