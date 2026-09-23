@@ -249,7 +249,8 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <input type=hidden name=k value="{{key}}">
 <label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="مثال: aJ3zGhhMuxE">
 <small>إذا تركته فارغًا سأحاول أخذه من بداية اسم الملف.</small>
-<label>ملف الصوت الجاهز</label><input type=file name=file accept="audio/*" required>
+<label>ملفات الصوت الجاهزة</label><input type=file name=file accept="audio/*" multiple required>
+<small>تقدر تختار عدة ملفات دفعة واحدة. إذا أسماء الملفات تبدأ بـ Video ID مثل aJ3zGhhMuxE_... راح أربط كل ملف تلقائيًا.</small>
 <button type=submit>رفع وربط الآن</button>
 </form>
 {{message|safe}}
@@ -296,19 +297,32 @@ def publish_clean():
     vid=(request.values.get('id') or '').strip()
     message=''
     if request.method=='POST':
-        incoming=request.files.get('file')
-        if incoming is None or not incoming.filename:
-            message='<div class="err">اختر ملف الصوت أولاً.</div>'
+        files=[x for x in request.files.getlist('file') if x and x.filename]
+        if not files:
+            message='<div class="err">اختر ملف صوت واحد على الأقل.</div>'
         else:
-            vid=_derive_video_id(vid,incoming.filename)
-            if not vid:
-                message='<div class="err">تعذر معرفة معرّف الفيديو. اكتبه يدويًا.</div>'
-            else:
+            results=[]
+            errors=[]
+            for incoming in files:
+                this_vid=_derive_video_id(vid if len(files)==1 else '',incoming.filename)
+                if not this_vid:
+                    errors.append(f'{incoming.filename}: تعذر معرفة Video ID من اسم الملف')
+                    continue
                 try:
-                    status,url=publish_clean_file(incoming,vid)
-                    message=f'<div class="ok">تم ✅<br>{status}<br><a style="color:#ffd982" href="{html.escape(url)}">{html.escape(url)}</a></div>'
+                    status,url=publish_clean_file(incoming,this_vid)
+                    results.append((incoming.filename,this_vid,status,url))
                 except Exception as e:
-                    message='<div class="err">'+html.escape(str(e))+'</div>'
+                    errors.append(f'{incoming.filename}: {str(e)}')
+            parts=[]
+            if results:
+                rows=''.join(
+                    f'<div style="margin:7px 0"><b>{html.escape(v)}</b> — {html.escape(s)}<br><a style="color:#ffd982" href="{html.escape(u)}">{html.escape(fn)}</a></div>'
+                    for fn,v,s,u in results
+                )
+                parts.append(f'<div class="ok">تم نشر {len(results)} ملف ✅{rows}</div>')
+            if errors:
+                parts.append('<div class="err">'+ '<br>'.join(html.escape(x) for x in errors) +'</div>')
+            message=''.join(parts)
     return render_template_string(CLEAN_HTML,key=supplied,vid=html.escape(vid),message=message)
 
 @app.get('/')
