@@ -268,7 +268,7 @@ def _derive_video_id(value, filename):
     # 10-LIDDzf-WLPQ_vocals...
     # and a YouTube id itself may begin with '-' as in:
     # 3--IhFHYf-9cQ_vocals...
-    name=re.sub(r'^\\d+-','',name)
+    name=re.sub(r'^\d+-','',name)
 
     m=re.match(r'^([A-Za-z0-9_-]{11})(?:_|$)',name)
     return m.group(1) if m else ''
