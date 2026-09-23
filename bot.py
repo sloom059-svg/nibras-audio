@@ -1,4 +1,4 @@
-import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html
+import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile
 from pathlib import Path
 from urllib.parse import quote
 import requests
@@ -16,7 +16,6 @@ PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
 
 app=Flask(__name__)
-app.config['MAX_CONTENT_LENGTH']=512*1024*1024
 
 JOB_QUEUE=queue.Queue()
 JOBS={}
@@ -251,8 +250,8 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <small>إذا تركته فارغًا سأحاول أخذه من بداية اسم الملف.</small>
 <label>مجلد المسلسل</label><input name=series value="{{series}}" placeholder="مثال: barbear" required>
 <small>كل مسلسل يكون داخل مجلد مستقل للتنظيم، مثل audio/barbear/.</small>
-<label>ملفات الصوت الجاهزة</label><input type=file name=file accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,audio/mp4,audio/x-m4a,audio/aac,audio/mpeg,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/opus" multiple required>
-<small>يدعم M4A و AAC و MP3 و WAV و FLAC و OGG و OPUS. تقدر تختار عدة ملفات دفعة واحدة. إذا أسماء الملفات تبدأ بـ Video ID مثل aJ3zGhhMuxE_... راح أربط كل ملف تلقائيًا.</small>
+<label>ملفات الصوت الجاهزة</label><input type=file name=file accept=".zip,.m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,audio/mp4,audio/x-m4a,audio/aac,audio/mpeg,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/opus,application/zip" multiple required>
+<small>يدعم ZIP و M4A و AAC و MP3 و WAV و FLAC و OGG و OPUS. إذا رفعت ZIP سأفكه تلقائيًا وألتقط كل ملفات الصوت داخله، وإذا أسماء الملفات تبدأ بـ Video ID مثل aJ3zGhhMuxE_... راح أربطها تلقائيًا.</small>
 <button type=submit>رفع وربط الآن</button>
 </form>
 <p style="margin-top:18px"><a style="color:#ffd982" href="/audio-status?k={{key}}">عرض حالة المقاطع المربوطة</a></p>
@@ -282,17 +281,17 @@ def upload_series(file,vid,series):
         raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
     return 'uploaded', update_audio_map(vid,path)
 
-def publish_clean_file(incoming, vid, series):
-    suffix=Path(incoming.filename or '').suffix.lower() or '.source'
+AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus'}
+
+def publish_clean_path(source_path, original_name, vid, series):
+    suffix=Path(original_name or source_path).suffix.lower() or '.source'
     work=QDIR/f'clean_{uuid.uuid4().hex}_{vid}{suffix}'
     final=O/f'{vid}.m4a'
-    incoming.save(work)
+    if Path(source_path)!=work:
+        shutil.copyfile(str(source_path),str(work))
     if not work.exists() or work.stat().st_size<1000:
         raise RuntimeError('الملف فارغ أو غير مكتمل')
     try:
-        # Preserve LALAL audio quality: if the uploaded file is AAC, only re-wrap
-        # it inside an M4A container without re-encoding. For other formats, fall
-        # back to AAC encoding for Android compatibility.
         probe=run(['ffprobe','-v','error','-select_streams','a:0','-show_entries','stream=codec_name','-of','default=noprint_wrappers=1:nokey=1',str(work)]).strip().lower()
         if probe=='aac':
             run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','copy',str(final)])
@@ -300,12 +299,56 @@ def publish_clean_file(incoming, vid, series):
             run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','192k',str(final)])
         if not final.exists() or final.stat().st_size<10000:
             raise RuntimeError('تعذر تجهيز ملف M4A')
-        status,url=upload_series(final,vid,series)
-        return status,url
+        return upload_series(final,vid,series)
     finally:
         try:work.unlink()
         except:pass
         try:final.unlink()
+        except:pass
+
+def publish_zip_file(incoming, series):
+    archive=QDIR/f'zip_{uuid.uuid4().hex}.zip'
+    incoming.save(archive)
+    results=[]
+    errors=[]
+    try:
+        with zipfile.ZipFile(archive,'r') as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                original=Path(info.filename).name
+                if Path(original).suffix.lower() not in AUDIO_EXTS:
+                    continue
+                vid=_derive_video_id('',original)
+                if not vid:
+                    errors.append(f'{info.filename}: تعذر معرفة Video ID من اسم الملف')
+                    continue
+                extracted=QDIR/f'zipitem_{uuid.uuid4().hex}{Path(original).suffix.lower()}'
+                try:
+                    with z.open(info,'r') as src, open(extracted,'wb') as dst:
+                        shutil.copyfileobj(src,dst)
+                    status,url=publish_clean_path(extracted,original,vid,series)
+                    results.append((original,vid,status,url))
+                except Exception as e:
+                    errors.append(f'{info.filename}: {str(e)}')
+                finally:
+                    try:extracted.unlink()
+                    except:pass
+        if not results and not errors:
+            errors.append('ملف ZIP لا يحتوي ملفات صوت مدعومة')
+        return results,errors
+    finally:
+        try:archive.unlink()
+        except:pass
+
+def publish_clean_file(incoming, vid, series):
+    suffix=Path(incoming.filename or '').suffix.lower() or '.source'
+    source=QDIR/f'incoming_{uuid.uuid4().hex}{suffix}'
+    incoming.save(source)
+    try:
+        return publish_clean_path(source,incoming.filename,vid,series)
+    finally:
+        try:source.unlink()
         except:pass
 
 @app.route('/publish-clean',methods=['GET','POST'])
@@ -324,6 +367,15 @@ def publish_clean():
             results=[]
             errors=[]
             for incoming in files:
+                if Path(incoming.filename or '').suffix.lower()=='.zip':
+                    try:
+                        zip_results,zip_errors=publish_zip_file(incoming,series)
+                        results.extend(zip_results)
+                        errors.extend(zip_errors)
+                    except Exception as e:
+                        errors.append(f'{incoming.filename}: {str(e)}')
+                    continue
+
                 this_vid=_derive_video_id(vid if len(files)==1 else '',incoming.filename)
                 if not this_vid:
                     errors.append(f'{incoming.filename}: تعذر معرفة Video ID من اسم الملف')
