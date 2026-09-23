@@ -260,87 +260,210 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <small>يدعم ZIP و M4A و AAC و MP3 و WAV و FLAC و OGG و OPUS، ويدعم لاحقة (1) و(2) وغيرها بعد Video ID.</small>
 <button id=submitBtn type=submit>رفع وربط الآن</button>
 </form>
-
 <div id=progressWrap class=progressWrap>
   <div class=progressTitle><span id=progressText>جاري تجهيز الرفع...</span><span id=progressPct>0%</span></div>
   <div class=progressTrack><div id=progressBar class=progressBar></div></div>
   <div class=progressNote id=progressNote>لا تغلق الصفحة حتى يكتمل الرفع والفحص.</div>
 </div>
-
 <p style="margin-top:18px"><a style="color:#ffd982" href="/audio-status?k={{key}}">عرض حالة المقاطع المربوطة</a></p>
 <div id=resultBox>{{message|safe}}</div>
 </div>
 <script>
 (function(){
-  const form=document.getElementById('uploadForm');
-  const btn=document.getElementById('submitBtn');
-  const wrap=document.getElementById('progressWrap');
-  const bar=document.getElementById('progressBar');
-  const pct=document.getElementById('progressPct');
-  const txt=document.getElementById('progressText');
-  const note=document.getElementById('progressNote');
-  const result=document.getElementById('resultBox');
-
+  const form=document.getElementById('uploadForm'),btn=document.getElementById('submitBtn'),wrap=document.getElementById('progressWrap'),bar=document.getElementById('progressBar'),pct=document.getElementById('progressPct'),txt=document.getElementById('progressText'),note=document.getElementById('progressNote'),result=document.getElementById('resultBox');
   form.addEventListener('submit',function(e){
     e.preventDefault();
-    const fd=new FormData(form);
-    const files=form.querySelector('input[type=file]').files;
-    if(!files || !files.length){ return; }
-
-    btn.disabled=true;
-    wrap.style.display='block';
-    result.innerHTML='';
-    bar.style.width='2%';
-    pct.textContent='0%';
-    txt.textContent='جاري رفع الملفات...';
-    note.textContent='سيتم تخطي الملفات الموجودة مسبقًا تلقائيًا.';
-
-    const xhr=new XMLHttpRequest();
-    xhr.open('POST',window.location.href,true);
-
-    xhr.upload.onprogress=function(ev){
-      if(!ev.lengthComputable)return;
-      const p=Math.max(1,Math.min(95,Math.round((ev.loaded/ev.total)*95)));
-      bar.style.width=p+'%';
-      pct.textContent=p+'%';
-      txt.textContent='جاري رفع الملفات...';
-    };
-
-    xhr.upload.onload=function(){
-      bar.style.width='96%';
-      pct.textContent='96%';
-      txt.textContent='تم الرفع — جاري فحص التكرار والربط...';
-    };
-
-    xhr.onload=function(){
-      btn.disabled=false;
-      if(xhr.status>=200 && xhr.status<300){
-        bar.style.width='100%';
-        pct.textContent='100%';
-        txt.textContent='اكتمل ✅';
-        const doc=new DOMParser().parseFromString(xhr.responseText,'text/html');
-        const incoming=doc.getElementById('resultBox');
-        result.innerHTML=incoming ? incoming.innerHTML : xhr.responseText;
-        note.textContent='انتهت العملية. راجع النتائج أدناه لمعرفة الجديد والموجود مسبقًا.';
-      }else{
-        txt.textContent='فشل الرفع';
-        note.textContent='HTTP '+xhr.status;
-        result.innerHTML='<div class="err">تعذر إكمال الرفع. حاول مرة أخرى.</div>';
-      }
-    };
-
-    xhr.onerror=function(){
-      btn.disabled=false;
-      txt.textContent='انقطع الاتصال';
-      note.textContent='تحقق من الشبكة ثم حاول مرة أخرى.';
-      result.innerHTML='<div class="err">تعذر الاتصال بالخادم.</div>';
-    };
-
+    const fd=new FormData(form), files=form.querySelector('input[type=file]').files;
+    if(!files||!files.length)return;
+    btn.disabled=true;wrap.style.display='block';result.innerHTML='';bar.style.width='2%';pct.textContent='0%';txt.textContent='جاري رفع الملفات...';note.textContent='سيتم تخطي الملفات الموجودة مسبقًا تلقائيًا.';
+    const xhr=new XMLHttpRequest(); xhr.open('POST',window.location.href,true);
+    xhr.upload.onprogress=function(ev){if(!ev.lengthComputable)return;const p=Math.max(1,Math.min(95,Math.round((ev.loaded/ev.total)*95)));bar.style.width=p+'%';pct.textContent=p+'%';};
+    xhr.upload.onload=function(){bar.style.width='96%';pct.textContent='96%';txt.textContent='تم الرفع — جاري فحص التكرار والربط...';};
+    xhr.onload=function(){btn.disabled=false;if(xhr.status>=200&&xhr.status<300){bar.style.width='100%';pct.textContent='100%';txt.textContent='اكتمل ✅';const doc=new DOMParser().parseFromString(xhr.responseText,'text/html');const incoming=doc.getElementById('resultBox');result.innerHTML=incoming?incoming.innerHTML:xhr.responseText;note.textContent='انتهت العملية. راجع النتائج أدناه.';}else{txt.textContent='فشل الرفع';note.textContent='HTTP '+xhr.status;result.innerHTML='<div class="err">تعذر إكمال الرفع.</div>';}}
+    xhr.onerror=function(){btn.disabled=false;txt.textContent='انقطع الاتصال';note.textContent='تحقق من الشبكة ثم حاول مرة أخرى.';result.innerHTML='<div class="err">تعذر الاتصال بالخادم.</div>';};
     xhr.send(fd);
   });
 })();
 </script>
 </html>'''
+
+def _derive_video_id(value, filename):
+    raw=re.sub(r'[^A-Za-z0-9_-]','',str(value or '').strip())
+    if raw:return raw
+    name=Path(filename or '').stem
+
+    # LALAL may prepend sequence numbers such as:
+    # 2-v2j0HEHwWNo_vocals...
+    # 10-LIDDzf-WLPQ_vocals...
+    # and a YouTube id itself may begin with '-' as in:
+    # 3--IhFHYf-9cQ_vocals...
+    name=re.sub(r'^\d+-','',name)
+
+    m=re.match(r'^([A-Za-z0-9_-]{11})(?=(?:\s*\(\d+\))?(?:_|$|\s))',name)
+    return m.group(1) if m else ''
+
+def series_slug(value):
+    value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
+    return value or 'general'
+
+def series_existing(vid, series):
+    folder=series_slug(series)
+    path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
+    api,old=gh_get(path)
+    if old:
+        return path, update_audio_map(vid,path)
+    return path, ''
+
+
+def upload_series(file,vid,series):
+    folder=series_slug(series)
+    path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
+    api,old=gh_get(path)
+    if old:
+        return 'skipped', update_audio_map(vid,path)
+    data=base64.b64encode(Path(file).read_bytes()).decode()
+    r=requests.put(api,headers=headers(),json={'message':f'Add cleaned audio {folder}/{vid}','content':data,'branch':BRANCH},timeout=240)
+    if r.status_code not in (200,201):
+        raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
+    return 'uploaded', update_audio_map(vid,path)
+
+AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus'}
+
+def publish_clean_path(source_path, original_name, vid, series):
+    suffix=Path(original_name or source_path).suffix.lower() or '.source'
+    work=QDIR/f'clean_{uuid.uuid4().hex}_{vid}{suffix}'
+    final=O/f'{vid}.m4a'
+    if Path(source_path)!=work:
+        shutil.copyfile(str(source_path),str(work))
+    if not work.exists() or work.stat().st_size<1000:
+        raise RuntimeError('الملف فارغ أو غير مكتمل')
+    try:
+        probe=run(['ffprobe','-v','error','-select_streams','a:0','-show_entries','stream=codec_name','-of','default=noprint_wrappers=1:nokey=1',str(work)]).strip().lower()
+        if probe=='aac':
+            run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','copy',str(final)])
+        else:
+            run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','192k',str(final)])
+        if not final.exists() or final.stat().st_size<10000:
+            raise RuntimeError('تعذر تجهيز ملف M4A')
+        return upload_series(final,vid,series)
+    finally:
+        try:work.unlink()
+        except:pass
+        try:final.unlink()
+        except:pass
+
+def publish_zip_file(incoming, series):
+    archive=QDIR/f'zip_{uuid.uuid4().hex}.zip'
+    incoming.save(archive)
+    results=[]
+    errors=[]
+    try:
+        with zipfile.ZipFile(archive,'r') as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                original=Path(info.filename).name
+                if Path(original).suffix.lower() not in AUDIO_EXTS:
+                    continue
+                if '_no_vocals_' in original.lower():
+                    continue
+                vid=_derive_video_id('',original)
+                if not vid:
+                    errors.append(f'{info.filename}: تعذر معرفة Video ID من اسم الملف')
+                    continue
+                try:
+                    _,existing_url=series_existing(vid,series)
+                    if existing_url:
+                        results.append((original,vid,'exists',existing_url))
+                        continue
+                except Exception as e:
+                    errors.append(f'{info.filename}: تعذر فحص التكرار: {str(e)}')
+                    continue
+                extracted=QDIR/f'zipitem_{uuid.uuid4().hex}{Path(original).suffix.lower()}'
+                try:
+                    with z.open(info,'r') as src, open(extracted,'wb') as dst:
+                        shutil.copyfileobj(src,dst)
+                    status,url=publish_clean_path(extracted,original,vid,series)
+                    results.append((original,vid,status,url))
+                except Exception as e:
+                    errors.append(f'{info.filename}: {str(e)}')
+                finally:
+                    try:extracted.unlink()
+                    except:pass
+        if not results and not errors:
+            errors.append('ملف ZIP لا يحتوي ملفات صوت مدعومة')
+        return results,errors
+    finally:
+        try:archive.unlink()
+        except:pass
+
+def publish_clean_file(incoming, vid, series):
+    suffix=Path(incoming.filename or '').suffix.lower() or '.source'
+    source=QDIR/f'incoming_{uuid.uuid4().hex}{suffix}'
+    incoming.save(source)
+    try:
+        return publish_clean_path(source,incoming.filename,vid,series)
+    finally:
+        try:source.unlink()
+        except:pass
+
+@app.route('/publish-clean',methods=['GET','POST'])
+def publish_clean():
+    supplied=(request.values.get('k') or '').strip()
+    if PUBLISH_KEY and supplied!=PUBLISH_KEY:
+        return 'Unauthorized',401
+    vid=(request.values.get('id') or '').strip()
+    series=(request.values.get('series') or '').strip()
+    message=''
+    if request.method=='POST':
+        files=[x for x in request.files.getlist('file') if x and x.filename]
+        if not files:
+            message='<div class="err">اختر ملف صوت واحد على الأقل.</div>'
+        else:
+            results=[]
+            errors=[]
+            for incoming in files:
+                if Path(incoming.filename or '').suffix.lower()=='.zip':
+                    try:
+                        zip_results,zip_errors=publish_zip_file(incoming,series)
+                        results.extend(zip_results)
+                        errors.extend(zip_errors)
+                    except Exception as e:
+                        errors.append(f'{incoming.filename}: {str(e)}')
+                    continue
+
+                this_vid=_derive_video_id(vid if len(files)==1 else '',incoming.filename)
+                if not this_vid:
+                    errors.append(f'{incoming.filename}: تعذر معرفة Video ID من اسم الملف')
+                    continue
+                try:
+                    _,existing_url=series_existing(this_vid,series)
+                    if existing_url:
+                        results.append((incoming.filename,this_vid,'exists',existing_url))
+                        continue
+                    status,url=publish_clean_file(incoming,this_vid,series)
+                    results.append((incoming.filename,this_vid,status,url))
+                except Exception as e:
+                    errors.append(f'{incoming.filename}: {str(e)}')
+            parts=[]
+            if results:
+                uploaded_count=sum(1 for _,_,s,_ in results if s in ('uploaded','published'))
+                existing_count=sum(1 for _,_,s,_ in results if s in ('exists','skipped'))
+                def _status_ar(s):
+                    return '♻️ موجود مسبقًا — تم تخطيه' if s in ('exists','skipped') else '✅ تم رفعه وربطه'
+                rows=''.join(
+                    f'<div style="margin:9px 0;padding:9px 0;border-bottom:1px solid #385044"><b>{html.escape(v)}</b> — {_status_ar(s)}<br><a style="color:#ffd982" href="{html.escape(u)}">{html.escape(fn)}</a></div>'
+                    for fn,v,s,u in results
+                )
+                summary=f'تم رفع {uploaded_count} جديد'
+                if existing_count:
+                    summary+=f' — وتخطي {existing_count} موجود مسبقًا'
+                parts.append(f'<div class="ok">{summary} ✅{rows}</div>')
+            if errors:
+                parts.append('<div class="err">'+ '<br>'.join(html.escape(x) for x in errors) +'</div>')
+            message=''.join(parts)
+    return render_template_string(CLEAN_HTML,key=supplied,vid=html.escape(vid),series=html.escape(series),message=message)
+
 
 STATUS_HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>نبراس | حالة الصوت</title>
