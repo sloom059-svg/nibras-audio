@@ -1,4 +1,4 @@
-import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time
+import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html
 from pathlib import Path
 from urllib.parse import quote
 import requests
