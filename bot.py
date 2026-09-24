@@ -354,17 +354,104 @@ def series_existing(vid, series):
     return path, ''
 
 
+def _gh_api(path):
+    return f'https://api.github.com/repos/{REPO}/{path.lstrip("/")}'
+
+def _git_data_upload(file_path, repo_path, message):
+    raw=Path(file_path).read_bytes()
+    data64=base64.b64encode(raw).decode()
+
+    # Read current branch head and tree.
+    ref=requests.get(_gh_api(f'git/ref/heads/{BRANCH}'),headers=headers(),timeout=60)
+    if ref.status_code!=200:
+        raise RuntimeError(f'GitHub ref {ref.status_code}: {ref.text[:800]}')
+    head_sha=(ref.json().get('object') or {}).get('sha')
+    if not head_sha:
+        raise RuntimeError('GitHub branch head غير معروف')
+
+    commit=requests.get(_gh_api(f'git/commits/{head_sha}'),headers=headers(),timeout=60)
+    if commit.status_code!=200:
+        raise RuntimeError(f'GitHub commit {commit.status_code}: {commit.text[:800]}')
+    base_tree=(commit.json().get('tree') or {}).get('sha')
+    if not base_tree:
+        raise RuntimeError('GitHub base tree غير معروف')
+
+    blob=requests.post(
+        _gh_api('git/blobs'),headers=headers(),
+        json={'content':data64,'encoding':'base64'},timeout=300
+    )
+    if blob.status_code not in (200,201):
+        raise RuntimeError(f'GitHub blob {blob.status_code}: {blob.text[:1000]}')
+    blob_sha=blob.json().get('sha')
+
+    tree=requests.post(
+        _gh_api('git/trees'),headers=headers(),
+        json={'base_tree':base_tree,'tree':[{
+            'path':repo_path,'mode':'100644','type':'blob','sha':blob_sha
+        }]},timeout=90
+    )
+    if tree.status_code not in (200,201):
+        raise RuntimeError(f'GitHub tree {tree.status_code}: {tree.text[:1000]}')
+    tree_sha=tree.json().get('sha')
+
+    new_commit=requests.post(
+        _gh_api('git/commits'),headers=headers(),
+        json={'message':message,'tree':tree_sha,'parents':[head_sha]},timeout=90
+    )
+    if new_commit.status_code not in (200,201):
+        raise RuntimeError(f'GitHub commit create {new_commit.status_code}: {new_commit.text[:1000]}')
+    new_sha=new_commit.json().get('sha')
+
+    update=requests.patch(
+        _gh_api(f'git/refs/heads/{BRANCH}'),headers=headers(),
+        json={'sha':new_sha,'force':False},timeout=90
+    )
+    if update.status_code not in (200,201):
+        raise RuntimeError(f'GitHub ref update {update.status_code}: {update.text[:1000]}')
+    return new_sha
+
 def upload_series(file,vid,series):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
     api,old=gh_get(path)
     if old:
         return 'skipped', update_audio_map(vid,path)
-    data=base64.b64encode(Path(file).read_bytes()).decode()
-    r=requests.put(api,headers=headers(),json={'message':f'Add cleaned audio {folder}/{vid}','content':data,'branch':BRANCH},timeout=240)
-    if r.status_code not in (200,201):
-        raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
-    return 'uploaded', update_audio_map(vid,path)
+
+    file_path=Path(file)
+    data=base64.b64encode(file_path.read_bytes()).decode()
+    message=f'Add cleaned audio {folder}/{vid}'
+
+    # Contents API is convenient for small files. Large audio or transient GitHub
+    # failures use the Git Data API, which avoids the Contents API processing limit.
+    use_git_data=file_path.stat().st_size >= 24*1024*1024
+    if not use_git_data:
+        last=None
+        for attempt in range(3):
+            try:
+                r=requests.put(api,headers=headers(),json={'message':message,'content':data,'branch':BRANCH},timeout=300)
+                last=r
+                if r.status_code in (200,201):
+                    return 'uploaded', update_audio_map(vid,path)
+                if r.status_code==422 and 'too large' in (r.text or '').lower():
+                    use_git_data=True
+                    break
+                if r.status_code in (500,502,503,504):
+                    time.sleep(2*(attempt+1))
+                    continue
+                raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
+            except requests.RequestException as e:
+                if attempt==2:
+                    use_git_data=True
+                    break
+                time.sleep(2*(attempt+1))
+
+    if use_git_data:
+        _git_data_upload(file_path,path,message)
+        return 'uploaded', update_audio_map(vid,path)
+
+    if last is not None:
+        raise RuntimeError(f'GitHub upload {last.status_code}: {last.text[:1000]}')
+    raise RuntimeError('GitHub upload failed')
 
 AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus'}
 
@@ -816,12 +903,17 @@ def runpod_process_job(job_id):
         set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
         log(f'gpu-clean {job_id} {job["id"]}: done {url}')
     except Exception as e:
-        set_runpod_job(job_id,status='failed',stage='failed',error=str(e)[-2500:],finished_at=time.time())
+        err=str(e)[-2500:]
+        keep_result = bool(final and final.exists() and ('GitHub' in err))
+        if keep_result:
+            set_runpod_job(job_id,status='failed',stage='github_failed',error=err,result_path=str(final),finished_at=time.time())
+        else:
+            set_runpod_job(job_id,status='failed',stage='failed',error=err,finished_at=time.time())
         log(f'gpu-clean {job_id}: FAILED {str(e)[-1000:]}')
     finally:
         try:source.unlink()
         except:pass
-        if final:
+        if final and not (RUNPOD_JOBS.get(job_id,{}).get('stage')=='github_failed'):
             try:final.unlink()
             except:pass
 
