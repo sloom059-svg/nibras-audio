@@ -1,4 +1,4 @@
-import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile
+import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile, tempfile, hashlib
 from pathlib import Path
 from urllib.parse import quote
 import requests
@@ -16,6 +16,11 @@ PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
 RUNPOD_API_KEY=os.getenv('RUNPOD_API_KEY','').strip()
 RUNPOD_ENDPOINT_ID=os.getenv('RUNPOD_ENDPOINT_ID','').strip()
+B2_KEY_ID=os.getenv('B2_KEY_ID','').strip()
+B2_APPLICATION_KEY=os.getenv('B2_APPLICATION_KEY','').strip()
+B2_BUCKET_NAME=os.getenv('B2_BUCKET_NAME','').strip()
+B2_AUTH_CACHE=None
+B2_AUTH_LOCK=threading.Lock()
 RUNPOD_BASE='https://api.runpod.ai/v2'
 
 app=Flask(__name__)
@@ -72,7 +77,7 @@ def gh_info(vid):
 def raw_url(path):
     return f'https://raw.githubusercontent.com/{REPO}/{BRANCH}/{quote(path, safe="/")}'
 
-def update_audio_map(vid, path):
+def update_audio_map_url(vid, url):
     api,old=gh_get(MAP_PATH)
     mapping={}; sha=None
     if old:
@@ -83,7 +88,6 @@ def update_audio_map(vid, path):
             if isinstance(obj,dict): mapping=obj
         except Exception:
             mapping={}
-    url=raw_url(path)
     if mapping.get(vid)==url:
         return url
     mapping[vid]=url
@@ -97,6 +101,9 @@ def update_audio_map(vid, path):
     if r.status_code not in (200,201):
         raise RuntimeError(f'GitHub map update {r.status_code}: {r.text[:900]}')
     return url
+
+def update_audio_map(vid, path):
+    return update_audio_map_url(vid, raw_url(path))
 
 def upload(file,vid):
     path,api,old=gh_info(vid)
@@ -348,6 +355,10 @@ def series_slug(value):
 def series_existing(vid, series):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
+    if B2_KEY_ID and B2_APPLICATION_KEY:
+        b2url=b2_existing_url(path)
+        if b2url:
+            return path, update_audio_map_url(vid,b2url)
     api,old=gh_get(path)
     if old:
         return path, update_audio_map(vid,path)
@@ -427,6 +438,89 @@ def _git_push_upload(file_path, repo_path, message):
     finally:
         shutil.rmtree(work,ignore_errors=True)
 
+def b2_authorize():
+    global B2_AUTH_CACHE
+    if not B2_KEY_ID or not B2_APPLICATION_KEY:
+        return None
+    with B2_AUTH_LOCK:
+        if B2_AUTH_CACHE and B2_AUTH_CACHE.get('_expires',0)>time.time()+60:
+            return B2_AUTH_CACHE
+        r=requests.get(
+            'https://api.backblazeb2.com/b2api/v2/b2_authorize_account',
+            auth=(B2_KEY_ID,B2_APPLICATION_KEY),timeout=30
+        )
+        if r.status_code!=200:
+            raise RuntimeError(f'Backblaze authorization failed HTTP {r.status_code}: {r.text[:400]}')
+        data=r.json()
+        allowed=data.get('allowed') or {}
+        bucket_id=allowed.get('bucketId')
+        bucket_name=(B2_BUCKET_NAME or allowed.get('bucketName') or '').strip()
+        if not bucket_id or not bucket_name:
+            raise RuntimeError('Backblaze key must be restricted to the Nibras audio bucket')
+        if allowed.get('bucketName') and B2_BUCKET_NAME and allowed.get('bucketName')!=B2_BUCKET_NAME:
+            raise RuntimeError('B2_BUCKET_NAME does not match the bucket allowed by this key')
+        capabilities=allowed.get('capabilities') or []
+        if 'writeFiles' not in capabilities:
+            raise RuntimeError('Backblaze application key needs writeFiles permission')
+        data['_bucket_id']=bucket_id
+        data['_bucket_name']=bucket_name
+        data['_expires']=time.time()+5*60*60
+        B2_AUTH_CACHE=data
+        return data
+
+def b2_file_url(file_name, auth_data):
+    return f"{auth_data['downloadUrl'].rstrip('/')}/file/{quote(auth_data['_bucket_name'],safe='')}/{quote(file_name,safe='/')}"
+
+def b2_existing_url(file_name):
+    auth_data=b2_authorize()
+    if not auth_data:
+        return ''
+    url=b2_file_url(file_name,auth_data)
+    r=requests.head(url,allow_redirects=True,timeout=30)
+    if r.status_code==200:
+        return url
+    if r.status_code==404:
+        return ''
+    raise RuntimeError(f'Backblaze public file check failed HTTP {r.status_code}; audio bucket must allow public reads')
+
+def b2_upload(file_path, file_name):
+    auth_data=b2_authorize()
+    if not auth_data:
+        return None
+    existing=b2_existing_url(file_name)
+    if existing:
+        return 'skipped',existing
+    r=requests.post(
+        f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_get_upload_url",
+        headers={'Authorization':auth_data['authorizationToken']},
+        json={'bucketId':auth_data['_bucket_id']},timeout=30
+    )
+    if r.status_code!=200:
+        raise RuntimeError(f'Backblaze upload URL request failed HTTP {r.status_code}: {r.text[:400]}')
+    upload_info=r.json()
+    sha1=hashlib.sha1()
+    with Path(file_path).open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):
+            sha1.update(chunk)
+        stream.seek(0)
+        response=requests.post(
+            upload_info['uploadUrl'],
+            headers={
+                'Authorization':upload_info['authorizationToken'],
+                'X-Bz-File-Name':quote(file_name,safe='/'),
+                'Content-Type':'audio/mp4',
+                'X-Bz-Content-Sha1':sha1.hexdigest(),
+            },
+            data=stream,timeout=(30,600)
+        )
+    if response.status_code not in (200,201):
+        raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+    url=b2_file_url(file_name,auth_data)
+    check=requests.head(url,allow_redirects=True,timeout=30)
+    if check.status_code!=200:
+        raise RuntimeError(f'Backblaze upload finished, but the file is not publicly playable (HTTP {check.status_code}); set the bucket to public')
+    return 'uploaded',url
+
 def upload_series(file,vid,series):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
@@ -435,6 +529,11 @@ def upload_series(file,vid,series):
         return 'skipped', update_audio_map(vid,path)
 
     file_path=Path(file)
+    if B2_KEY_ID and B2_APPLICATION_KEY:
+        result=b2_upload(file_path,path)
+        if result:
+            status,url=result
+            return status, update_audio_map_url(vid,url)
     message=f'Add cleaned audio {folder}/{vid}'
     size=file_path.stat().st_size
 
@@ -915,9 +1014,10 @@ def runpod_process_job(job_id):
         log(f'gpu-clean {job_id} {job["id"]}: done {url}')
     except Exception as e:
         err=str(e)[-2500:]
-        keep_result = bool(final and final.exists() and ('GitHub' in err))
+        keep_result = bool(final and final.exists() and any(x in err for x in ('GitHub','Backblaze','B2')))
         if keep_result:
-            set_runpod_job(job_id,status='failed',stage='github_failed',error=err,result_path=str(final),finished_at=time.time())
+            failure_stage='storage_failed' if any(x in err for x in ('Backblaze','B2')) else 'github_failed'
+            set_runpod_job(job_id,status='failed',stage=failure_stage,error=err,result_path=str(final),finished_at=time.time())
         else:
             set_runpod_job(job_id,status='failed',stage='failed',error=err,finished_at=time.time())
         log(f'gpu-clean {job_id}: FAILED {str(e)[-1000:]}')
