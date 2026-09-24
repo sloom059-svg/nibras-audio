@@ -1,4 +1,3 @@
-import base64
 import os
 import subprocess
 import sys
@@ -39,6 +38,7 @@ def handler(event):
     inp = event.get("input") or {}
     source_url = str(inp.get("source_url", "")).strip()
     youtube_id = str(inp.get("youtube_id", "")).strip()
+    upload_url = str(inp.get("upload_url", "")).strip()
 
     if not source_url:
         return {"error": "source_url is required"}
@@ -74,12 +74,28 @@ def handler(event):
             "-c:a", "aac", "-b:a", "192k", str(final)
         ])
 
-        raw = final.read_bytes()
+        size = final.stat().st_size
+        if upload_url:
+            with final.open("rb") as fh:
+                response = requests.post(
+                    upload_url,
+                    files={"file": (filename, fh, "audio/mp4")},
+                    timeout=600,
+                )
+            response.raise_for_status()
+            return {
+                "filename": filename,
+                "size": size,
+                "model": model,
+                "uploaded": True,
+            }
+
         return {
             "filename": filename,
-            "audio_base64": base64.b64encode(raw).decode("ascii"),
-            "size": len(raw),
+            "size": size,
             "model": model,
+            "uploaded": False,
+            "error": "upload_url is required for large audio results",
         }
 
 
