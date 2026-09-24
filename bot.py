@@ -357,58 +357,75 @@ def series_existing(vid, series):
 def _gh_api(path):
     return f'https://api.github.com/repos/{REPO}/{path.lstrip("/")}'
 
-def _git_data_upload(file_path, repo_path, message):
-    raw=Path(file_path).read_bytes()
-    data64=base64.b64encode(raw).decode()
+def _git_push_upload(file_path, repo_path, message):
+    file_path=Path(file_path)
+    if file_path.stat().st_size >= 95*1024*1024:
+        raise RuntimeError('الملف يتجاوز حد GitHub العادي 100MB')
 
-    # Read current branch head and tree.
-    ref=requests.get(_gh_api(f'git/ref/heads/{BRANCH}'),headers=headers(),timeout=60)
-    if ref.status_code!=200:
-        raise RuntimeError(f'GitHub ref {ref.status_code}: {ref.text[:800]}')
-    head_sha=(ref.json().get('object') or {}).get('sha')
-    if not head_sha:
-        raise RuntimeError('GitHub branch head غير معروف')
-
-    commit=requests.get(_gh_api(f'git/commits/{head_sha}'),headers=headers(),timeout=60)
-    if commit.status_code!=200:
-        raise RuntimeError(f'GitHub commit {commit.status_code}: {commit.text[:800]}')
-    base_tree=(commit.json().get('tree') or {}).get('sha')
-    if not base_tree:
-        raise RuntimeError('GitHub base tree غير معروف')
-
-    blob=requests.post(
-        _gh_api('git/blobs'),headers=headers(),
-        json={'content':data64,'encoding':'base64'},timeout=300
+    work=Path(tempfile.mkdtemp(prefix='nibras-git-',dir=str(WORK)))
+    askpass=work/'askpass.sh'
+    repo_dir=work/'repo'
+    repo_dir.mkdir(parents=True,exist_ok=True)
+    askpass.write_text(
+        '#!/bin/sh\n'
+        'case "$1" in\n'
+        '  *Username*) echo "x-access-token" ;;\n'
+        '  *Password*) echo "$GITHUB_TOKEN" ;;\n'
+        'esac\n'
     )
-    if blob.status_code not in (200,201):
-        raise RuntimeError(f'GitHub blob {blob.status_code}: {blob.text[:1000]}')
-    blob_sha=blob.json().get('sha')
+    askpass.chmod(0o700)
+    env=os.environ.copy()
+    env.update({
+        'GIT_ASKPASS':str(askpass),
+        'GIT_TERMINAL_PROMPT':'0',
+        'GIT_CONFIG_NOSYSTEM':'1'
+    })
+    remote=f'https://github.com/{REPO}.git'
+    try:
+        def grun(args, timeout=300):
+            p=subprocess.run(args,cwd=repo_dir,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=timeout)
+            if p.returncode:
+                raise RuntimeError(f'git command failed ({p.returncode}): {(p.stdout or "")[-2000:]}')
+            return (p.stdout or '').strip()
 
-    tree=requests.post(
-        _gh_api('git/trees'),headers=headers(),
-        json={'base_tree':base_tree,'tree':[{
-            'path':repo_path,'mode':'100644','type':'blob','sha':blob_sha
-        }]},timeout=90
-    )
-    if tree.status_code not in (200,201):
-        raise RuntimeError(f'GitHub tree {tree.status_code}: {tree.text[:1000]}')
-    tree_sha=tree.json().get('sha')
+        grun(['git','init','-q'])
+        grun(['git','config','user.name','Nibras Audio Bot'])
+        grun(['git','config','user.email','nibras-bot@users.noreply.github.com'])
+        grun(['git','remote','add','origin',remote])
 
-    new_commit=requests.post(
-        _gh_api('git/commits'),headers=headers(),
-        json={'message':message,'tree':tree_sha,'parents':[head_sha]},timeout=90
-    )
-    if new_commit.status_code not in (200,201):
-        raise RuntimeError(f'GitHub commit create {new_commit.status_code}: {new_commit.text[:1000]}')
-    new_sha=new_commit.json().get('sha')
+        # Fetch commit/tree metadata only; avoid downloading the ~1GB audio blobs.
+        grun(['git','fetch','--depth','1','--filter=blob:none','origin',BRANCH],timeout=600)
+        parent=grun(['git','rev-parse','FETCH_HEAD'])
+        grun(['git','read-tree',parent])
 
-    update=requests.patch(
-        _gh_api(f'git/refs/heads/{BRANCH}'),headers=headers(),
-        json={'sha':new_sha,'force':False},timeout=90
-    )
-    if update.status_code not in (200,201):
-        raise RuntimeError(f'GitHub ref update {update.status_code}: {update.text[:1000]}')
-    return new_sha
+        blob_sha=grun(['git','hash-object','-w',str(file_path)],timeout=300)
+        grun(['git','update-index','--add','--cacheinfo','100644',blob_sha,repo_path])
+        tree_sha=grun(['git','write-tree'])
+        commit_sha=grun(['git','commit-tree',tree_sha,'-p',parent,'-m',message])
+
+        # Push directly through Git protocol. Retry on non-fast-forward if another
+        # audio-map commit landed between fetch and push.
+        for attempt in range(3):
+            p=subprocess.run(
+                ['git','push','origin',f'{commit_sha}:refs/heads/{BRANCH}'],
+                cwd=repo_dir,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=600
+            )
+            if p.returncode==0:
+                return commit_sha
+            out=(p.stdout or '')
+            if 'non-fast-forward' not in out and 'fetch first' not in out and 'rejected' not in out:
+                raise RuntimeError(f'git push failed ({p.returncode}): {out[-2000:]}')
+
+            grun(['git','fetch','--depth','1','--filter=blob:none','origin',BRANCH],timeout=600)
+            parent=grun(['git','rev-parse','FETCH_HEAD'])
+            grun(['git','read-tree',parent])
+            grun(['git','update-index','--add','--cacheinfo','100644',blob_sha,repo_path])
+            tree_sha=grun(['git','write-tree'])
+            commit_sha=grun(['git','commit-tree',tree_sha,'-p',parent,'-m',message])
+
+        raise RuntimeError('git push failed after retries')
+    finally:
+        shutil.rmtree(work,ignore_errors=True)
 
 def upload_series(file,vid,series):
     folder=series_slug(series)
@@ -418,13 +435,13 @@ def upload_series(file,vid,series):
         return 'skipped', update_audio_map(vid,path)
 
     file_path=Path(file)
-    data=base64.b64encode(file_path.read_bytes()).decode()
     message=f'Add cleaned audio {folder}/{vid}'
+    size=file_path.stat().st_size
 
-    # Contents API is convenient for small files. Large audio or transient GitHub
-    # failures use the Git Data API, which avoids the Contents API processing limit.
-    use_git_data=file_path.stat().st_size >= 24*1024*1024
-    if not use_git_data:
+    # Small files: use Contents API. Larger files: bypass REST size limits and
+    # push the blob through Git protocol (GitHub accepts regular files <100MB).
+    if size < 20*1024*1024:
+        data=base64.b64encode(file_path.read_bytes()).decode()
         last=None
         for attempt in range(3):
             try:
@@ -432,26 +449,20 @@ def upload_series(file,vid,series):
                 last=r
                 if r.status_code in (200,201):
                     return 'uploaded', update_audio_map(vid,path)
-                if r.status_code==422 and 'too large' in (r.text or '').lower():
-                    use_git_data=True
+                if r.status_code==422 and ('too large' in (r.text or '').lower() or 'input was too large' in (r.text or '').lower()):
                     break
                 if r.status_code in (500,502,503,504):
                     time.sleep(2*(attempt+1))
                     continue
                 raise RuntimeError(f'GitHub upload {r.status_code}: {r.text[:1000]}')
-            except requests.RequestException as e:
-                if attempt==2:
-                    use_git_data=True
-                    break
-                time.sleep(2*(attempt+1))
+            except requests.RequestException:
+                if attempt<2:
+                    time.sleep(2*(attempt+1))
+                    continue
+                break
 
-    if use_git_data:
-        _git_data_upload(file_path,path,message)
-        return 'uploaded', update_audio_map(vid,path)
-
-    if last is not None:
-        raise RuntimeError(f'GitHub upload {last.status_code}: {last.text[:1000]}')
-    raise RuntimeError('GitHub upload failed')
+    _git_push_upload(file_path,path,message)
+    return 'uploaded', update_audio_map(vid,path)
 
 AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus'}
 
