@@ -908,7 +908,7 @@ f.addEventListener('submit',async e=>{
 
  if(oneZip){
    try{
-     const file=files[0],chunkSize=8*1024*1024,total=Math.ceil(file.size/chunkSize);
+     const file=files[0],chunkSize=2*1024*1024,total=Math.ceil(file.size/chunkSize);
      const uploadId=(crypto.randomUUID?crypto.randomUUID().replaceAll('-',''):Array.from(crypto.getRandomValues(new Uint8Array(16))).map(x=>x.toString(16).padStart(2,'0')).join(''));
      let batchId=null;
      for(let i=0;i<total;i++){
@@ -916,9 +916,23 @@ f.addEventListener('submit',async e=>{
        fd.append('upload_id',uploadId);fd.append('series',series);fd.append('filename',file.name);
        fd.append('index',String(i));fd.append('total',String(total));
        fd.append('chunk',file.slice(i*chunkSize,Math.min(file.size,(i+1)*chunkSize)),file.name+'.part');
-       const r=await fetch('/gpu-clean-chunk',{method:'POST',body:fd});
-       const j=await r.json().catch(()=>({ok:false,error:'استجابة غير متوقعة'}));
-       if(!r.ok||!j.ok)throw new Error(j.error||('HTTP '+r.status));
+       let j=null,lastError=null;
+       for(let attempt=0;attempt<4;attempt++){
+         let response=null;
+         try{response=await fetch('/gpu-clean-chunk',{method:'POST',body:fd});}
+         catch(err){lastError=err;}
+         if(response){
+           const body=await response.json().catch(()=>({ok:false,error:'استجابة غير متوقعة'}));
+           if(response.ok&&body.ok){j=body;lastError=null;break;}
+           lastError=new Error(body.error||('HTTP '+response.status));
+           if(![502,503,504].includes(response.status))throw lastError;
+         }
+         if(attempt<3){
+           uploadLabel.textContent='إعادة إرسال الجزء '+(i+1)+'...';
+           await new Promise(resolve=>setTimeout(resolve,1000*(attempt+1)));
+         }
+       }
+       if(!j)throw lastError||new Error('تعذر رفع الجزء بعد عدة محاولات');
        const p=Math.round(((i+1)/total)*100);
        uploadFill.style.width=p+'%';uploadPct.textContent=p+'%';
        uploadLabel.textContent='جاري رفع ZIP — الجزء '+(i+1)+' من '+total;
@@ -1159,6 +1173,40 @@ def gpu_clean():
     return jsonify(ok=True,status='queued',jobs=queued,count=len(queued)),202
 
 
+def _assemble_gpu_chunks(chunk_dir,zpath,total,series,filename,base_url,batch_id):
+    chunk_dir=Path(chunk_dir); zpath=Path(zpath)
+    try:
+        missing=[i for i in range(total) if not (chunk_dir/f'{i:06d}.part').exists()]
+        if missing:
+            with RUNPOD_JOBS_LOCK:
+                row=RUNPOD_JOBS.get(batch_id,{})
+                row.update(status='failed',stage='zip_error',error=f'أجزاء ناقصة: {missing[:5]}',updated_at=time.time(),finished_at=time.time())
+                RUNPOD_JOBS[batch_id]=row
+            return
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            row.update(status='processing',stage='assembling',updated_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+        with open(zpath,'wb') as out:
+            for i in range(total):
+                part_path=chunk_dir/f'{i:06d}.part'
+                with open(part_path,'rb') as src:
+                    shutil.copyfileobj(src,out,1024*1024)
+                try:part_path.unlink()
+                except:pass
+        try:chunk_dir.rmdir()
+        except:pass
+        _process_gpu_zip(zpath,series,base_url,batch_id)
+    except Exception as e:
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            row.update(status='failed',stage='zip_error',error=str(e)[-1200:],updated_at=time.time(),finished_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+        try:zpath.unlink()
+        except:pass
+    finally:
+        shutil.rmtree(chunk_dir,ignore_errors=True)
+
 @app.post('/gpu-clean-chunk')
 def gpu_clean_chunk():
     if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
@@ -1187,33 +1235,23 @@ def gpu_clean_chunk():
     if index != total-1:
         return jsonify(ok=True,status='chunk_saved',index=index,total=total),200
 
-    # Last chunk: verify all parts exist, assemble quickly, then process ZIP in background.
-    missing=[i for i in range(total) if not (chunk_dir/f'{i:06d}.part').exists()]
-    if missing:
-        return jsonify(ok=False,error=f'أجزاء ناقصة: {missing[:5]}'),409
-
-    zpath=QDIR/f'gpu_zip_{upload_id}.zip'
-    with open(zpath,'wb') as out:
-        for i in range(total):
-            p=chunk_dir/f'{i:06d}.part'
-            with open(p,'rb') as src:
-                shutil.copyfileobj(src,out,1024*1024)
-            try:p.unlink()
-            except:pass
-    try:chunk_dir.rmdir()
-    except:pass
-
-    batch_id=uuid.uuid4().hex
-    base_url=public_base_url()
+    # Use the upload id as the batch id so a retried final chunk is idempotent.
+    batch_id=upload_id
     with RUNPOD_JOBS_LOCK:
+        existing=RUNPOD_JOBS.get(batch_id)
+        if existing and existing.get('stage') in ('assembling','expanding_zip','expanded','done'):
+            return jsonify(ok=True,status='queued',batch_id=batch_id,zip_background=True),202
         RUNPOD_JOBS[batch_id]={
             'job_id':batch_id,'filename':filename,'series':series,
-            'status':'queued','stage':'expanding_zip','jobs':[],'count':0,
+            'status':'queued','stage':'assembling','jobs':[],'count':0,
             'created_at':time.time(),'updated_at':time.time()
         }
+    zpath=QDIR/f'gpu_zip_{upload_id}.zip'
+    base_url=public_base_url()
     threading.Thread(
-        target=_process_gpu_zip,args=(zpath,series,base_url,batch_id),
-        daemon=True,name=f'gpu-zip-{batch_id[:8]}'
+        target=_assemble_gpu_chunks,
+        args=(chunk_dir,zpath,total,series,filename,base_url,batch_id),
+        daemon=True,name=f'gpu-assemble-{batch_id[:8]}'
     ).start()
     return jsonify(ok=True,status='queued',batch_id=batch_id,zip_background=True),202
 
