@@ -954,25 +954,48 @@ function pollBatch(id){
    if(!j.ok){setTimeout(tick,2000);return}
    if(j.status==='failed'){box.innerHTML='<div class=err>فشل فك ZIP: '+esc(j.error||'خطأ')+'</div>';return}
    if(j.status==='done'){
+     const ids=j.jobs||[], total=ids.length;
      box.innerHTML='<div class=ok>تم فك ZIP وتجهيز '+(j.count||0)+' ملف ✅</div>';
-     (j.jobs||[]).forEach(poll);return;
+     if(!total){
+       msg.innerHTML='<div class=ok>اكتملت العملية ✅ لا توجد ملفات قابلة للمعالجة داخل ZIP.</div>';
+       return;
+     }
+     let finished=0,failed=0,existing=0,uploaded=0;
+     const onDone=function(result){
+       finished++;
+       if(result.status==='failed')failed++;
+       else if(result.result==='exists')existing++;
+       else uploaded++;
+       if(finished===total){
+         loadStorageUsage();
+         if(failed===0){
+           msg.innerHTML='<div class=ok><b>اكتملت العملية بالكامل ✅</b><br>تمت معالجة '+total+' ملف — رفع وربط '+uploaded+(existing?' — وتخطي '+existing+' موجود مسبقًا':'')+'.<br>تم تحديث <b>audio-map.json</b> وربط الملفات الصوتية بنجاح ✅</div>';
+         }else{
+           msg.innerHTML='<div class=err><b>انتهت المعالجة مع أخطاء.</b><br>نجح '+(total-failed)+' من '+total+' — وفشل '+failed+'. راجع حالة الملفات بالأسفل.</div>';
+         }
+       }else{
+         msg.innerHTML='<div class=ok>جاري المعالجة: اكتمل '+finished+' من '+total+' ملف...</div>';
+       }
+     };
+     ids.forEach(x=>poll(x,onDone));return;
    }
    box.querySelector('.muted').textContent='جاري فك ZIP وتجهيز الملفات...';
    setTimeout(tick,2000);
  }).catch(()=>setTimeout(tick,2500));
  tick();
 }
-function poll(id){
+function poll(id,onDone){
  fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(r=>r.json()).then(j=>{
    let box=document.getElementById('j_'+id); if(!box){box=document.createElement('div');box.className='job';box.id='j_'+id;jobs.appendChild(box);}
    let p=8,label='بانتظار RunPod...';
    if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
-   if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
-   if(j.status==='done'){p=100;label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث audio-map.json ✅');loadStorageUsage()}
+   if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري رفع الصوت النظيف وربطه...'}
+   if(j.status==='done'){p=100;label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتمل الرفع والربط وتم تحديث audio-map.json ✅');loadStorageUsage()}
    if(j.status==='failed'){p=100;label='فشل ❌'}
    box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div><div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
-   if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
- }).catch(()=>setTimeout(()=>poll(id),3000));
+   if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id,onDone),2000);
+   else if(onDone)onDone(j);
+ }).catch(()=>setTimeout(()=>poll(id,onDone),3000));
 }
 f.addEventListener('submit',async e=>{
  e.preventDefault();b.disabled=true;msg.innerHTML='<div class=ok>جاري رفع الملفات إلى نبراس...</div>';
