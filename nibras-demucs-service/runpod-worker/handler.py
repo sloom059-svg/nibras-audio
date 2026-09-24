@@ -1,6 +1,7 @@
 import base64
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -48,8 +49,8 @@ def handler(event):
         run(["ffmpeg", "-y", "-i", str(source), "-vn", "-ac", "2", "-ar", "44100", str(wav)])
 
         out_root = work / "demucs"
-        model = os.getenv("DEMUCS_MODEL", "htdemucs")
-        run(["python", "-m", "demucs", "--two-stems=vocals", "-n", model, "-o", str(out_root), str(wav)])
+        model = os.getenv("DEMUCS_MODEL", "htdemucs_ft")
+        run([sys.executable, "-m", "demucs", "--two-stems=vocals", "-n", model, "-o", str(out_root), str(wav)])
 
         vocals = out_root / model / "input" / "vocals.wav"
         if not vocals.exists():
