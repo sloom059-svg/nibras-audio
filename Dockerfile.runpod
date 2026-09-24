@@ -16,6 +16,6 @@ RUN pip3 install --no-cache-dir \
 COPY runpod-handler.py /app/handler.py
 
 ENV PYTHONUNBUFFERED=1
-ENV DEMUCS_MODEL=htdemucs
+ENV DEMUCS_MODEL=htdemucs_ft
 
 CMD ["python3", "-u", "/app/handler.py"]
