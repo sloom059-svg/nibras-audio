@@ -2,7 +2,7 @@ import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, h
 from pathlib import Path
 from urllib.parse import quote
 import requests
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, send_file
 
 WORK=Path('/tmp/nibras'); D=WORK/'downloads'; S=WORK/'separated'; O=WORK/'output'; QDIR=WORK/'queued'
 for p in (D,S,O,QDIR): p.mkdir(parents=True,exist_ok=True)
@@ -14,6 +14,9 @@ FOLDER=os.getenv('GITHUB_FOLDER','processed-audio').strip().strip('/')
 UPLOAD_KEY=os.getenv('UPLOAD_KEY','').strip()
 PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
+RUNPOD_API_KEY=os.getenv('RUNPOD_API_KEY','').strip()
+RUNPOD_ENDPOINT_ID=os.getenv('RUNPOD_ENDPOINT_ID','').strip()
+RUNPOD_BASE='https://api.runpod.ai/v2'
 
 app=Flask(__name__)
 
@@ -25,6 +28,9 @@ WORKER_START_LOCK=threading.Lock()
 
 PUBLISH_JOBS={}
 PUBLISH_JOBS_LOCK=threading.Lock()
+RUNPOD_JOBS={}
+RUNPOD_JOBS_LOCK=threading.Lock()
+RUNPOD_AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus','.mp4','.webm'}
 
 HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
 <style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}</style>
@@ -628,6 +634,190 @@ def playlist_entries(value):
     out=run(['yt-dlp','--flat-playlist','--dump-single-json','--no-warnings',url])
     obj=json.loads(out)
     return [{'id':str(x.get('id') or ''),'title':str(x.get('title') or '')} for x in (obj.get('entries') or []) if x and x.get('id')]
+
+
+GPU_CLEAN_HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>نبراس | إزالة الموسيقى بالـ GPU</title>
+<style>
+body{font-family:Arial;background:#15171b;color:#fff;max-width:760px;margin:30px auto;padding:18px}.c{background:#22262c;padding:24px;border-radius:18px}
+label{display:block;margin:14px 0 7px;font-weight:700}input,button{width:100%;padding:13px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:16px}
+input{background:#111;color:#fff}button{margin-top:18px;background:#7c5cff;color:#fff;font-weight:900;cursor:pointer}button:disabled{opacity:.55}
+small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-top:16px}.err{background:#4b1d23;padding:12px;border-radius:10px;margin-top:16px}
+.job{background:#111;border:1px solid #3b4149;border-radius:12px;padding:12px;margin-top:10px}.bar{height:10px;background:#2b3037;border-radius:999px;overflow:hidden;margin-top:8px}
+.fill{height:100%;width:5%;background:#8f7cff;transition:width .2s}.muted{color:#aaa;font-size:13px}
+</style>
+<div class=c><h2>نبراس | إزالة الموسيقى بالـ GPU</h2>
+<p>ارفع الصوت الخام، وسيتم فصل الموسيقى على RunPod ثم رفع الصوت النظيف إلى GitHub وربطه تلقائيًا في <b>audio-map.json</b>.</p>
+<form id=f enctype=multipart/form-data>
+<label>مجلد المسلسل</label><input name=series placeholder="مثال: mshmsh" required>
+<label>الملفات</label><input type=file name=file multiple required accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,.mp4,.webm,.zip,audio/*,video/mp4,application/zip">
+<small>اسم الملف يجب أن يبدأ بـ Video ID (11 حرفًا)، مثل: yCYQZ5ICnIE.mp3 أو yCYQZ5ICnIE episode.mp3. يدعم ZIP أيضًا.</small>
+<button id=b type=submit>رفع وبدء إزالة الموسيقى</button>
+</form>
+<div id=msg></div><div id=jobs></div>
+<p style="margin-top:18px"><a style="color:#ffd982" href="/publish-clean">رفع صوت جاهز بدون موسيقى</a></p>
+</div>
+<script>
+const f=document.getElementById('f'),b=document.getElementById('b'),msg=document.getElementById('msg'),jobs=document.getElementById('jobs');
+function esc(v){const d=document.createElement('div');d.textContent=String(v||'');return d.innerHTML;}
+function poll(id){
+ fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(r=>r.json()).then(j=>{
+   let box=document.getElementById('j_'+id); if(!box){box=document.createElement('div');box.className='job';box.id='j_'+id;jobs.appendChild(box);}
+   let p=8,label='بانتظار RunPod...';
+   if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
+   if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
+   if(j.status==='done'){p=100;label='اكتمل ✅'}
+   if(j.status==='failed'){p=100;label='فشل ❌'}
+   box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div><div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
+   if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
+ }).catch(()=>setTimeout(()=>poll(id),3000));
+}
+f.addEventListener('submit',e=>{
+ e.preventDefault();b.disabled=true;msg.innerHTML='<div class=ok>جاري رفع الملفات إلى نبراس...</div>';
+ const x=new XMLHttpRequest();x.open('POST','/gpu-clean',true);
+ x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){msg.innerHTML='<div class=ok>تم الاستلام ✅ المعالجة تعمل بالخلفية.</div>';(j.jobs||[]).forEach(poll);return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
+ x.onerror=()=>{b.disabled=false;msg.innerHTML='<div class=err>تعذر الاتصال بالخادم</div>'};
+ x.send(new FormData(f));
+});
+</script></html>'''
+
+def set_runpod_job(job_id, **changes):
+    with RUNPOD_JOBS_LOCK:
+        row=RUNPOD_JOBS.get(job_id,{})
+        row.update(changes)
+        row['updated_at']=time.time()
+        RUNPOD_JOBS[job_id]=row
+
+def runpod_headers():
+    return {'Authorization':f'Bearer {RUNPOD_API_KEY}','Content-Type':'application/json'}
+
+def runpod_process_job(job_id):
+    with RUNPOD_JOBS_LOCK:
+        job=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not job:return
+    source=Path(job['source']); final=None
+    try:
+        set_runpod_job(job_id,status='processing',stage='submit')
+        payload={'input':{'source_url':job['source_url'],'youtube_id':job['id']}}
+        r=requests.post(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/run',headers=runpod_headers(),json=payload,timeout=60)
+        if r.status_code>=300:
+            raise RuntimeError(f'RunPod submit {r.status_code}: {r.text[:700]}')
+        remote_id=(r.json() or {}).get('id')
+        if not remote_id:raise RuntimeError('RunPod لم يرجع Job ID')
+        set_runpod_job(job_id,remote_job_id=remote_id,stage='gpu')
+        deadline=time.time()+3600
+        output=None
+        while time.time()<deadline:
+            s=requests.get(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/status/{remote_id}',headers=runpod_headers(),timeout=60)
+            if s.status_code>=300:
+                raise RuntimeError(f'RunPod status {s.status_code}: {s.text[:700]}')
+            data=s.json() or {}
+            status=data.get('status')
+            if status=='COMPLETED':
+                output=data.get('output') or {}
+                break
+            if status in ('FAILED','CANCELLED','TIMED_OUT'):
+                raise RuntimeError(f'RunPod انتهى بالحالة {status}: {str(data)[:900]}')
+            time.sleep(2)
+        if output is None:raise RuntimeError('انتهت مهلة انتظار RunPod')
+        if output.get('error'):raise RuntimeError(str(output.get('error')))
+        b64=output.get('audio_base64')
+        if not b64:raise RuntimeError('RunPod لم يرجع ملف الصوت')
+        final=O/f'gpu_{job_id}_{job["id"]}.m4a'
+        final.write_bytes(base64.b64decode(b64))
+        if final.stat().st_size<10000:raise RuntimeError('ملف RunPod الناتج غير مكتمل')
+        set_runpod_job(job_id,status='publishing',stage='github')
+        status,url=upload_series(final,job['id'],job['series'])
+        set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
+        log(f'gpu-clean {job_id} {job["id"]}: done {url}')
+    except Exception as e:
+        set_runpod_job(job_id,status='failed',stage='failed',error=str(e)[-2500:],finished_at=time.time())
+        log(f'gpu-clean {job_id}: FAILED {str(e)[-1000:]}')
+    finally:
+        try:source.unlink()
+        except:pass
+        if final:
+            try:final.unlink()
+            except:pass
+
+@app.route('/gpu-clean',methods=['GET','POST'])
+def gpu_clean():
+    if request.method=='GET':
+        return render_template_string(GPU_CLEAN_HTML)
+    if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
+        return jsonify(ok=False,error='أضف RUNPOD_API_KEY و RUNPOD_ENDPOINT_ID في Railway أولًا'),503
+    series=(request.form.get('series') or '').strip()
+    if not series:return jsonify(ok=False,error='اكتب اسم مجلد المسلسل'),400
+    uploaded=[x for x in request.files.getlist('file') if x and x.filename]
+    if not uploaded:return jsonify(ok=False,error='اختر ملفًا واحدًا على الأقل'),400
+
+    base_url=request.host_url.rstrip('/')
+    queued=[]
+    expanded=[]
+    temp_zip_paths=[]
+    try:
+        for incoming in uploaded:
+            suffix=Path(incoming.filename or '').suffix.lower()
+            if suffix=='.zip':
+                zpath=QDIR/f'gpu_zip_{uuid.uuid4().hex}.zip'
+                incoming.save(zpath); temp_zip_paths.append(zpath)
+                with zipfile.ZipFile(zpath,'r') as z:
+                    for info in z.infolist():
+                        if info.is_dir():continue
+                        original=Path(info.filename).name
+                        ext=Path(original).suffix.lower()
+                        if ext not in RUNPOD_AUDIO_EXTS:continue
+                        dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{ext}'
+                        with z.open(info,'r') as src,open(dst,'wb') as out:shutil.copyfileobj(src,out)
+                        expanded.append((original,dst))
+            else:
+                if suffix not in RUNPOD_AUDIO_EXTS:
+                    continue
+                dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{suffix or ".source"}'
+                incoming.save(dst)
+                expanded.append((incoming.filename,dst))
+        for original,source in expanded:
+            vid=_derive_video_id('',original)
+            if not vid:
+                try:source.unlink()
+                except:pass
+                continue
+            job_id=uuid.uuid4().hex
+            token=uuid.uuid4().hex+uuid.uuid4().hex
+            source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
+            row={'job_id':job_id,'id':vid,'filename':original,'series':series,'source':str(source),
+                 'source_url':source_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
+                 'created_at':time.time(),'updated_at':time.time()}
+            with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
+            threading.Thread(target=runpod_process_job,args=(job_id,),daemon=True,name=f'gpu-{job_id[:8]}').start()
+            queued.append(job_id)
+    finally:
+        for p in temp_zip_paths:
+            try:p.unlink()
+            except:pass
+    if not queued:
+        return jsonify(ok=False,error='لم أجد ملفات باسم يبدأ بـ Video ID صحيح'),400
+    return jsonify(ok=True,status='queued',jobs=queued,count=len(queued)),202
+
+@app.get('/gpu-source/<job_id>')
+def gpu_source(job_id):
+    token=(request.args.get('t') or '').strip()
+    with RUNPOD_JOBS_LOCK:
+        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not row or not token or token!=row.get('token'):
+        return 'not found',404
+    path=Path(row.get('source',''))
+    if not path.exists():return 'not found',404
+    return send_file(path,as_attachment=False,download_name=row.get('filename') or path.name)
+
+@app.get('/gpu-clean-status/<job_id>')
+def gpu_clean_status(job_id):
+    with RUNPOD_JOBS_LOCK:
+        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not row:return jsonify(ok=False,error='job_not_found'),404
+    for k in ('source','source_url','token','remote_job_id'):row.pop(k,None)
+    return jsonify(ok=True,**row)
+
 
 @app.get('/audio-status')
 def audio_status():
