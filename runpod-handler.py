@@ -1,6 +1,7 @@
 import base64
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -55,7 +56,7 @@ def handler(event):
         model = os.getenv("DEMUCS_MODEL", "htdemucs_ft")
         out_root = work / "demucs"
         run([
-            "python3", "-m", "demucs",
+            sys.executable, "-m", "demucs",
             "--two-stems=vocals",
             "-n", model,
             "-o", str(out_root),
