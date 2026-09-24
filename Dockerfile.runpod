@@ -13,6 +13,9 @@ RUN pip3 install --no-cache-dir \
     torch torchaudio --index-url https://download.pytorch.org/whl/cu124 \
     && pip3 install --no-cache-dir -r /app/requirements.txt
 
+# Cache the fine-tuned Demucs weights in the image so the first job starts faster.
+RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_ft')"
+
 COPY runpod-handler.py /app/handler.py
 
 ENV PYTHONUNBUFFERED=1
