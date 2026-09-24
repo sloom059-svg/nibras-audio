@@ -521,6 +521,13 @@ def b2_upload(file_path, file_name):
         raise RuntimeError(f'Backblaze upload finished, but the file is not publicly playable (HTTP {check.status_code}); set the bucket to public')
     return 'uploaded',url
 
+if B2_KEY_ID and B2_APPLICATION_KEY:
+    try:
+        auth_data=b2_authorize()
+        log(f"Backblaze storage authorized for bucket {auth_data['_bucket_name']}")
+    except Exception as e:
+        log(f'Backblaze storage authorization failed: {e}')
+
 def upload_series(file,vid,series):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
@@ -1014,9 +1021,10 @@ def runpod_process_job(job_id):
         log(f'gpu-clean {job_id} {job["id"]}: done {url}')
     except Exception as e:
         err=str(e)[-2500:]
-        keep_result = bool(final and final.exists() and any(x in err for x in ('GitHub','Backblaze','B2')))
+        current_stage=RUNPOD_JOBS.get(job_id,{}).get('stage')
+        keep_result = bool(final and final.exists() and (current_stage=='github' or any(x in err for x in ('GitHub','Backblaze','B2'))))
         if keep_result:
-            failure_stage='storage_failed' if any(x in err for x in ('Backblaze','B2')) else 'github_failed'
+            failure_stage='storage_failed' if current_stage=='github' or any(x in err for x in ('Backblaze','B2')) else 'github_failed'
             set_runpod_job(job_id,status='failed',stage=failure_stage,error=err,result_path=str(final),finished_at=time.time())
         else:
             set_runpod_job(job_id,status='failed',stage='failed',error=err,finished_at=time.time())
@@ -1024,7 +1032,7 @@ def runpod_process_job(job_id):
     finally:
         try:source.unlink()
         except:pass
-        if final and not (RUNPOD_JOBS.get(job_id,{}).get('stage')=='github_failed'):
+        if final and RUNPOD_JOBS.get(job_id,{}).get('stage') not in ('github_failed','storage_failed'):
             try:final.unlink()
             except:pass
 
