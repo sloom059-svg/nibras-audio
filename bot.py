@@ -1331,10 +1331,20 @@ def gpu_clean_chunk():
     part_path=chunk_dir/f'{index:06d}.part'
     part.save(part_path)
 
-    if index != total-1:
-        return jsonify(ok=True,status='chunk_saved',index=index,total=total),200
+    # Do not assume the last-index request arrives last. Mobile browsers/proxies
+    # can complete chunk uploads out of order. Only assemble once every part exists.
+    missing=[i for i in range(total) if not (chunk_dir/f'{i:06d}.part').exists()]
+    if missing:
+        return jsonify(
+            ok=True,
+            status='chunk_saved',
+            index=index,
+            total=total,
+            received=total-len(missing),
+            missing_count=len(missing)
+        ),200
 
-    # Use the upload id as the batch id so a retried final chunk is idempotent.
+    # Use the upload id as the batch id so retries are idempotent.
     batch_id=upload_id
     with RUNPOD_JOBS_LOCK:
         existing=RUNPOD_JOBS.get(batch_id)
