@@ -55,7 +55,7 @@ def handler(event):
         model = os.getenv("DEMUCS_MODEL", "htdemucs_ft")
         out_root = work / "demucs"
         run([
-            "python", "-m", "demucs",
+            "python3", "-m", "demucs",
             "--two-stems=vocals",
             "-n", model,
             "-o", str(out_root),
