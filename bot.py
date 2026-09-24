@@ -654,11 +654,16 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <small>اسم الملف يجب أن يبدأ بـ Video ID (11 حرفًا)، مثل: yCYQZ5ICnIE.mp3 أو yCYQZ5ICnIE episode.mp3. يدعم ZIP أيضًا.</small>
 <button id=b type=submit>رفع وبدء إزالة الموسيقى</button>
 </form>
+<div id=uploadWrap style="display:none" class=job>
+  <b id=uploadLabel>جاري رفع الملفات...</b>
+  <div class=bar><div id=uploadFill class=fill style="width:0%"></div></div>
+  <div id=uploadPct class=muted style="margin-top:6px">0%</div>
+</div>
 <div id=msg></div><div id=jobs></div>
 <p style="margin-top:18px"><a style="color:#ffd982" href="/publish-clean">رفع صوت جاهز بدون موسيقى</a></p>
 </div>
 <script>
-const f=document.getElementById('f'),b=document.getElementById('b'),msg=document.getElementById('msg'),jobs=document.getElementById('jobs');
+const f=document.getElementById('f'),b=document.getElementById('b'),msg=document.getElementById('msg'),jobs=document.getElementById('jobs'),uploadWrap=document.getElementById('uploadWrap'),uploadFill=document.getElementById('uploadFill'),uploadPct=document.getElementById('uploadPct'),uploadLabel=document.getElementById('uploadLabel');
 function esc(v){const d=document.createElement('div');d.textContent=String(v||'');return d.innerHTML;}
 function poll(id){
  fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(r=>r.json()).then(j=>{
@@ -666,7 +671,7 @@ function poll(id){
    let p=8,label='بانتظار RunPod...';
    if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
-   if(j.status==='done'){p=100;label='اكتمل ✅'}
+   if(j.status==='done'){p=100;label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث audio-map.json ✅')}
    if(j.status==='failed'){p=100;label='فشل ❌'}
    box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div><div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
    if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
@@ -675,7 +680,9 @@ function poll(id){
 f.addEventListener('submit',e=>{
  e.preventDefault();b.disabled=true;msg.innerHTML='<div class=ok>جاري رفع الملفات إلى نبراس...</div>';
  const x=new XMLHttpRequest();x.open('POST','/gpu-clean',true);
- x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){msg.innerHTML='<div class=ok>تم الاستلام ✅ المعالجة تعمل بالخلفية.</div>';(j.jobs||[]).forEach(poll);return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
+ uploadWrap.style.display='block';uploadFill.style.width='0%';uploadPct.textContent='0%';uploadLabel.textContent='جاري رفع الملفات...';
+ x.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.max(0,Math.min(100,Math.round((e.loaded/e.total)*100)));uploadFill.style.width=p+'%';uploadPct.textContent=p+'%';if(p>=100)uploadLabel.textContent='اكتمل الرفع — جاري تجهيز المهام...';}};
+ x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){uploadFill.style.width='100%';uploadPct.textContent='100%';uploadLabel.textContent='تم رفع الملفات بنجاح ✅';msg.innerHTML='<div class=ok>تم الاستلام ✅ تابع حالة كل ملف بالأسفل؛ عند النهاية سيظهر تأكيد تحديث audio-map.json.</div>';(j.jobs||[]).forEach(poll);return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
  x.onerror=()=>{b.disabled=false;msg.innerHTML='<div class=err>تعذر الاتصال بالخادم</div>'};
  x.send(new FormData(f));
 });
