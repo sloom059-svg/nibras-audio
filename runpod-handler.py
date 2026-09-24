@@ -52,7 +52,7 @@ def handler(event):
             "-vn", "-ac", "2", "-ar", "44100", str(wav)
         ])
 
-        model = os.getenv("DEMUCS_MODEL", "htdemucs")
+        model = os.getenv("DEMUCS_MODEL", "htdemucs_ft")
         out_root = work / "demucs"
         run([
             "python", "-m", "demucs",
