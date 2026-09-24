@@ -23,6 +23,9 @@ JOBS_LOCK=threading.Lock()
 WORKER_STARTED=False
 WORKER_START_LOCK=threading.Lock()
 
+PUBLISH_JOBS={}
+PUBLISH_JOBS_LOCK=threading.Lock()
+
 HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
 <style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}</style>
 <div class=c><h2>نبراس | معالج الصوت</h2><p>Queue مفعّلة: يستقبل الملف فورًا، ثم يعالج الملفات واحدًا واحدًا بالخلفية ويرفع الناتج تلقائيًا.</p><pre>جاهز</pre></div></html>'''
@@ -279,7 +282,34 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
     const xhr=new XMLHttpRequest(); xhr.open('POST',window.location.href,true);
     xhr.upload.onprogress=function(ev){if(!ev.lengthComputable)return;const p=Math.max(1,Math.min(95,Math.round((ev.loaded/ev.total)*95)));bar.style.width=p+'%';pct.textContent=p+'%';};
     xhr.upload.onload=function(){bar.style.width='96%';pct.textContent='96%';txt.textContent='تم الرفع — جاري فحص التكرار والربط...';};
-    xhr.onload=function(){btn.disabled=false;if(xhr.status>=200&&xhr.status<300){bar.style.width='100%';pct.textContent='100%';txt.textContent='اكتمل ✅';const doc=new DOMParser().parseFromString(xhr.responseText,'text/html');const incoming=doc.getElementById('resultBox');result.innerHTML=incoming?incoming.innerHTML:xhr.responseText;note.textContent='انتهت العملية. راجع النتائج أدناه.';}else{txt.textContent='فشل الرفع';note.textContent='HTTP '+xhr.status;result.innerHTML='<div class="err">تعذر إكمال الرفع.</div>';}}
+    function esc(v){const d=document.createElement('div');d.textContent=String(v||'');return d.innerHTML;}
+    function renderJob(j){
+      const rows=(j.results||[]).map(function(x){const fn=x[0],v=x[1],s=x[2],u=x[3];const label=(s==='exists'||s==='skipped')?'♻️ موجود مسبقًا — تم تخطيه':'✅ تم رفعه وربطه';return '<div style="margin:9px 0;padding:9px 0;border-bottom:1px solid #385044"><b>'+esc(v)+'</b> — '+label+'<br><a style="color:#ffd982" href="'+esc(u)+'">'+esc(fn)+'</a></div>';}).join('');
+      const errs=(j.errors||[]).map(esc).join('<br>');
+      const uploaded=(j.results||[]).filter(x=>x[2]==='uploaded'||x[2]==='published').length;
+      const existing=(j.results||[]).filter(x=>x[2]==='exists'||x[2]==='skipped').length;
+      result.innerHTML=(rows?'<div class="ok">تم رفع '+uploaded+' جديد'+(existing?' — وتخطي '+existing+' موجود مسبقًا':'')+' ✅'+rows+'</div>':'')+(errs?'<div class="err">'+errs+'</div>':'');
+    }
+    function pollJob(jobId){
+      fetch('/publish-clean-status/'+encodeURIComponent(jobId),{cache:'no-store'}).then(r=>r.json()).then(function(j){
+        if(!j.ok)throw new Error(j.error||'status error');
+        const total=Number(j.total||0),done=Number(j.done||0);
+        const p=total?Math.min(99,96+Math.round((done/total)*3)):97;
+        bar.style.width=p+'%';pct.textContent=p+'%';
+        txt.textContent=j.status==='queued'?'تم الاستلام — بانتظار المعالجة...':'جاري معالجة '+done+(total?' من '+total:'')+'...';
+        note.textContent=j.current?('الملف الحالي: '+j.current):'يمكنك إبقاء الصفحة مفتوحة لمتابعة النتيجة.';
+        if(j.status==='done'){btn.disabled=false;bar.style.width='100%';pct.textContent='100%';txt.textContent='اكتمل ✅';note.textContent='انتهت العملية. راجع النتائج أدناه.';renderJob(j);return;}
+        if(j.status==='failed'){btn.disabled=false;txt.textContent='فشلت المعالجة';note.textContent=j.error||'حدث خطأ';result.innerHTML='<div class="err">'+esc(j.error||'تعذر إكمال المعالجة')+'</div>';return;}
+        setTimeout(()=>pollJob(jobId),2000);
+      }).catch(function(){setTimeout(()=>pollJob(jobId),3000);});
+    }
+    xhr.onload=function(){
+      if(xhr.status===202){
+        try{const j=JSON.parse(xhr.responseText);if(j.job_id){txt.textContent='تم استلام الملف ✅';note.textContent='بدأت المعالجة بالخلفية؛ لن ينقطع العمل إذا طال الطلب.';pollJob(j.job_id);return;}}catch(e){}
+      }
+      btn.disabled=false;
+      if(xhr.status>=200&&xhr.status<300){bar.style.width='100%';pct.textContent='100%';txt.textContent='اكتمل ✅';const doc=new DOMParser().parseFromString(xhr.responseText,'text/html');const incoming=doc.getElementById('resultBox');result.innerHTML=incoming?incoming.innerHTML:xhr.responseText;note.textContent='انتهت العملية. راجع النتائج أدناه.';}else{txt.textContent='فشل الرفع';note.textContent='HTTP '+xhr.status;result.innerHTML='<div class="err">تعذر إكمال الرفع.</div>';}
+    }
     xhr.onerror=function(){btn.disabled=false;txt.textContent='انقطع الاتصال';note.textContent='تحقق من الشبكة ثم حاول مرة أخرى.';result.innerHTML='<div class="err">تعذر الاتصال بالخادم.</div>';};
     xhr.send(fd);
   });
@@ -407,6 +437,80 @@ def publish_clean_file(incoming, vid, series):
         try:source.unlink()
         except:pass
 
+def set_publish_job(job_id, **changes):
+    with PUBLISH_JOBS_LOCK:
+        row=PUBLISH_JOBS.get(job_id,{})
+        row.update(changes)
+        row['updated_at']=time.time()
+        PUBLISH_JOBS[job_id]=row
+
+def publish_zip_path(archive, series, job_id=None):
+    results=[]
+    errors=[]
+    archive=Path(archive)
+    try:
+        with zipfile.ZipFile(archive,'r') as z:
+            items=[x for x in z.infolist() if not x.is_dir() and Path(Path(x.filename).name).suffix.lower() in AUDIO_EXTS and '_no_vocals_' not in Path(x.filename).name.lower()]
+            total=len(items)
+            if job_id:
+                set_publish_job(job_id,status='processing',stage='extracting',total=total,done=0,results=[],errors=[])
+            for index,info in enumerate(items,1):
+                original=Path(info.filename).name
+                vid=_derive_video_id('',original)
+                if not vid:
+                    errors.append(f'{info.filename}: تعذر معرفة Video ID من اسم الملف')
+                    if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
+                    continue
+                try:
+                    _,existing_url=series_existing(vid,series)
+                    if existing_url:
+                        results.append((original,vid,'exists',existing_url))
+                        if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
+                        continue
+                except Exception as e:
+                    errors.append(f'{info.filename}: تعذر فحص التكرار: {str(e)}')
+                    if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
+                    continue
+                extracted=QDIR/f'zipitem_{uuid.uuid4().hex}{Path(original).suffix.lower()}'
+                try:
+                    if job_id:set_publish_job(job_id,stage='publishing',current=original,done=index-1)
+                    with z.open(info,'r') as src, open(extracted,'wb') as dst:
+                        shutil.copyfileobj(src,dst)
+                    status,url=publish_clean_path(extracted,original,vid,series)
+                    results.append((original,vid,status,url))
+                except Exception as e:
+                    errors.append(f'{info.filename}: {str(e)}')
+                finally:
+                    try:extracted.unlink()
+                    except:pass
+                if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
+        if not results and not errors:
+            errors.append('ملف ZIP لا يحتوي ملفات صوت مدعومة')
+        return results,errors
+    finally:
+        try:archive.unlink()
+        except:pass
+
+def publish_zip_background(job_id, archive, series):
+    try:
+        results,errors=publish_zip_path(archive,series,job_id)
+        set_publish_job(job_id,status='done',stage='done',results=results,errors=errors,finished_at=time.time(),current='')
+        log(f'publish-clean {job_id}: done results={len(results)} errors={len(errors)}')
+    except Exception as e:
+        set_publish_job(job_id,status='failed',stage='failed',error=str(e)[-2500:],finished_at=time.time())
+        log(f'publish-clean {job_id}: FAILED {str(e)[-1000:]}')
+        try:Path(archive).unlink()
+        except:pass
+
+@app.get('/publish-clean-status/<job_id>')
+def publish_clean_status(job_id):
+    with PUBLISH_JOBS_LOCK:
+        row=dict(PUBLISH_JOBS.get(job_id,{}) or {})
+    if not row:
+        return jsonify(ok=False,error='job_not_found'),404
+    row.pop('archive',None)
+    return jsonify(ok=True,**row)
+
 @app.route('/publish-clean',methods=['GET','POST'])
 def publish_clean():
     supplied=''
@@ -418,6 +522,29 @@ def publish_clean():
         if not files:
             message='<div class="err">اختر ملف صوت واحد على الأقل.</div>'
         else:
+            # ZIP files can take minutes when they contain many episodes. Save the
+            # archive first, answer the browser immediately, then publish in a
+            # background job so a proxy/client timeout cannot abort the work.
+            if len(files)==1 and Path(files[0].filename or '').suffix.lower()=='.zip':
+                incoming=files[0]
+                job_id=uuid.uuid4().hex
+                archive=QDIR/f'publish_{job_id}.zip'
+                incoming.save(archive)
+                if not archive.exists() or archive.stat().st_size<1000:
+                    try:archive.unlink()
+                    except:pass
+                    return jsonify(ok=False,error='ملف ZIP فارغ أو غير مكتمل'),400
+                with PUBLISH_JOBS_LOCK:
+                    PUBLISH_JOBS[job_id]={
+                        'job_id':job_id,'status':'queued','stage':'waiting','series':series,
+                        'filename':incoming.filename,'size':archive.stat().st_size,'total':0,'done':0,
+                        'current':'','results':[],'errors':[],'error':'',
+                        'created_at':time.time(),'updated_at':time.time(),'archive':str(archive)
+                    }
+                threading.Thread(target=publish_zip_background,args=(job_id,archive,series),daemon=True,name=f'publish-{job_id[:8]}').start()
+                log(f'publish-clean {job_id}: accepted zip size={archive.stat().st_size}')
+                return jsonify(ok=True,status='queued',job_id=job_id),202
+
             results=[]
             errors=[]
             for incoming in files:
