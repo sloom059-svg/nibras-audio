@@ -691,12 +691,43 @@ function poll(id){
    if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
  }).catch(()=>setTimeout(()=>poll(id),3000));
 }
-f.addEventListener('submit',e=>{
+f.addEventListener('submit',async e=>{
  e.preventDefault();b.disabled=true;msg.innerHTML='<div class=ok>جاري رفع الملفات إلى نبراس...</div>';
- const x=new XMLHttpRequest();x.open('POST','/gpu-clean',true);
+ const files=[...f.querySelector('input[type=file]').files];
+ const series=f.querySelector('input[name=series]').value.trim();
+ const oneZip=files.length===1&&files[0].name.toLowerCase().endsWith('.zip');
+
  uploadWrap.style.display='block';uploadFill.style.width='0%';uploadPct.textContent='0%';uploadLabel.textContent='جاري رفع الملفات...';
+
+ if(oneZip){
+   try{
+     const file=files[0],chunkSize=8*1024*1024,total=Math.ceil(file.size/chunkSize);
+     const uploadId=(crypto.randomUUID?crypto.randomUUID().replaceAll('-',''):Array.from(crypto.getRandomValues(new Uint8Array(16))).map(x=>x.toString(16).padStart(2,'0')).join(''));
+     let batchId=null;
+     for(let i=0;i<total;i++){
+       const fd=new FormData();
+       fd.append('upload_id',uploadId);fd.append('series',series);fd.append('filename',file.name);
+       fd.append('index',String(i));fd.append('total',String(total));
+       fd.append('chunk',file.slice(i*chunkSize,Math.min(file.size,(i+1)*chunkSize)),file.name+'.part');
+       const r=await fetch('/gpu-clean-chunk',{method:'POST',body:fd});
+       const j=await r.json().catch(()=>({ok:false,error:'استجابة غير متوقعة'}));
+       if(!r.ok||!j.ok)throw new Error(j.error||('HTTP '+r.status));
+       const p=Math.round(((i+1)/total)*100);
+       uploadFill.style.width=p+'%';uploadPct.textContent=p+'%';
+       uploadLabel.textContent='جاري رفع ZIP — الجزء '+(i+1)+' من '+total;
+       if(j.batch_id)batchId=j.batch_id;
+     }
+     uploadLabel.textContent='تم رفع ZIP بالكامل ✅';msg.innerHTML='<div class=ok>تم الاستلام ✅ جاري فك الملف المضغوط وتجهيز المهام بالخلفية.</div>';
+     if(batchId)pollBatch(batchId);
+   }catch(err){
+     msg.innerHTML='<div class=err>تعذر بدء المعالجة: '+esc(err.message||err)+'</div>';
+   }finally{b.disabled=false}
+   return;
+ }
+
+ const x=new XMLHttpRequest();x.open('POST','/gpu-clean',true);
  x.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.max(0,Math.min(100,Math.round((e.loaded/e.total)*100)));uploadFill.style.width=p+'%';uploadPct.textContent=p+'%';if(p>=100)uploadLabel.textContent='اكتمل الرفع — جاري تجهيز المهام...';}};
- x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){uploadFill.style.width='100%';uploadPct.textContent='100%';uploadLabel.textContent='تم رفع الملفات بنجاح ✅';msg.innerHTML='<div class=ok>تم الاستلام ✅ '+(j.zip_background?'جاري فك الملف المضغوط وتجهيز المهام بالخلفية.':'تابع حالة كل ملف بالأسفل؛ عند النهاية سيظهر تأكيد تحديث audio-map.json.')+'</div>';if(j.batch_id){pollBatch(j.batch_id)}else{(j.jobs||[]).forEach(poll)}return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
+ x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){uploadFill.style.width='100%';uploadPct.textContent='100%';uploadLabel.textContent='تم رفع الملفات بنجاح ✅';msg.innerHTML='<div class=ok>تم الاستلام ✅ تابع حالة كل ملف بالأسفل.</div>';if(j.batch_id){pollBatch(j.batch_id)}else{(j.jobs||[]).forEach(poll)}return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
  x.onerror=()=>{b.disabled=false;msg.innerHTML='<div class=err>تعذر الاتصال بالخادم</div>'};
  x.send(new FormData(f));
 });
@@ -761,8 +792,6 @@ def runpod_process_job(job_id):
             try:final.unlink()
             except:pass
 
-@app.route('/gpu-clean',methods=['GET','POST'])
-
 def _enqueue_gpu_source(original, source, series, base_url):
     vid=_derive_video_id('',original)
     if not vid:
@@ -822,6 +851,7 @@ def _process_gpu_zip(zpath, series, base_url, batch_id):
         try: zpath.unlink()
         except: pass
 
+@app.route('/gpu-clean',methods=['GET','POST'])
 def gpu_clean():
     if request.method=='GET':
         return render_template_string(GPU_CLEAN_HTML)
@@ -866,6 +896,65 @@ def gpu_clean():
     if not queued:
         return jsonify(ok=False,error='لم أجد ملفات باسم يبدأ بـ Video ID صحيح'),400
     return jsonify(ok=True,status='queued',jobs=queued,count=len(queued)),202
+
+
+@app.post('/gpu-clean-chunk')
+def gpu_clean_chunk():
+    if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
+        return jsonify(ok=False,error='إعداد RunPod غير مكتمل'),503
+    upload_id=(request.form.get('upload_id') or '').strip()
+    series=(request.form.get('series') or '').strip()
+    filename=Path(request.form.get('filename') or 'upload.zip').name
+    try:
+        index=int(request.form.get('index','-1'))
+        total=int(request.form.get('total','0'))
+    except Exception:
+        return jsonify(ok=False,error='بيانات الجزء غير صحيحة'),400
+    if not upload_id or not re.fullmatch(r'[a-f0-9]{32}',upload_id):
+        return jsonify(ok=False,error='معرّف الرفع غير صحيح'),400
+    if not series or index<0 or total<1 or index>=total:
+        return jsonify(ok=False,error='بيانات الرفع ناقصة'),400
+    part=request.files.get('chunk')
+    if not part:
+        return jsonify(ok=False,error='الجزء غير موجود'),400
+
+    chunk_dir=QDIR/f'gpu_chunks_{upload_id}'
+    chunk_dir.mkdir(parents=True,exist_ok=True)
+    part_path=chunk_dir/f'{index:06d}.part'
+    part.save(part_path)
+
+    if index != total-1:
+        return jsonify(ok=True,status='chunk_saved',index=index,total=total),200
+
+    # Last chunk: verify all parts exist, assemble quickly, then process ZIP in background.
+    missing=[i for i in range(total) if not (chunk_dir/f'{i:06d}.part').exists()]
+    if missing:
+        return jsonify(ok=False,error=f'أجزاء ناقصة: {missing[:5]}'),409
+
+    zpath=QDIR/f'gpu_zip_{upload_id}.zip'
+    with open(zpath,'wb') as out:
+        for i in range(total):
+            p=chunk_dir/f'{i:06d}.part'
+            with open(p,'rb') as src:
+                shutil.copyfileobj(src,out,1024*1024)
+            try:p.unlink()
+            except:pass
+    try:chunk_dir.rmdir()
+    except:pass
+
+    batch_id=uuid.uuid4().hex
+    base_url=request.host_url.rstrip('/')
+    with RUNPOD_JOBS_LOCK:
+        RUNPOD_JOBS[batch_id]={
+            'job_id':batch_id,'filename':filename,'series':series,
+            'status':'queued','stage':'expanding_zip','jobs':[],'count':0,
+            'created_at':time.time(),'updated_at':time.time()
+        }
+    threading.Thread(
+        target=_process_gpu_zip,args=(zpath,series,base_url,batch_id),
+        daemon=True,name=f'gpu-zip-{batch_id[:8]}'
+    ).start()
+    return jsonify(ok=True,status='queued',batch_id=batch_id,zip_background=True),202
 
 @app.get('/gpu-source/<job_id>')
 def gpu_source(job_id):
