@@ -948,6 +948,17 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <script>
 const f=document.getElementById('f'),b=document.getElementById('b'),msg=document.getElementById('msg'),jobs=document.getElementById('jobs'),uploadWrap=document.getElementById('uploadWrap'),uploadFill=document.getElementById('uploadFill'),uploadPct=document.getElementById('uploadPct'),uploadLabel=document.getElementById('uploadLabel');
 function esc(v){const d=document.createElement('div');d.textContent=String(v||'');return d.innerHTML;}
+function fmtGB(bytes){return (Number(bytes||0)/1024/1024/1024).toFixed(2)}
+function loadStorageUsage(){
+ fetch('/b2-usage',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+   const text=document.getElementById('storageText'),fill=document.getElementById('storageFill');
+   if(!text||!fill)return;
+   if(!j.ok){text.textContent='تعذر قراءة المساحة الآن';fill.style.width='0%';return}
+   text.textContent='المستخدم '+fmtGB(j.bytes)+' GB من 10 GB — المتبقي '+fmtGB(j.remaining_bytes)+' GB — '+j.files+' ملف';
+   fill.style.width=Math.max(1,Math.min(100,Number(j.percent||0)))+'%';
+ }).catch(()=>{const text=document.getElementById('storageText');if(text)text.textContent='تعذر قراءة المساحة الآن'});
+}
+loadStorageUsage();
 function pollBatch(id){
  const box=document.createElement('div');box.className='job';box.innerHTML='<b>ملف ZIP</b><div class=muted>جاري تجهيز الملفات...</div><div class=bar><div class=fill style="width:20%"></div></div>';jobs.prepend(box);
  const tick=()=>fetch('/gpu-clean-status/'+id).then(r=>r.json()).then(j=>{
