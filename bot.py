@@ -21,6 +21,8 @@ B2_APPLICATION_KEY=os.getenv('B2_APPLICATION_KEY','').strip()
 B2_BUCKET_NAME=os.getenv('B2_BUCKET_NAME','').strip()
 B2_AUTH_CACHE=None
 B2_AUTH_LOCK=threading.Lock()
+B2_USAGE_CACHE={'at':0,'bytes':0,'files':0}
+B2_USAGE_LOCK=threading.Lock()
 RUNPOD_BASE='https://api.runpod.ai/v2'
 
 app=Flask(__name__)
@@ -299,6 +301,16 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
     xhr.upload.onprogress=function(ev){if(!ev.lengthComputable)return;const p=Math.max(1,Math.min(95,Math.round((ev.loaded/ev.total)*95)));bar.style.width=p+'%';pct.textContent=p+'%';};
     xhr.upload.onload=function(){bar.style.width='96%';pct.textContent='96%';txt.textContent='تم الرفع — جاري فحص التكرار والربط...';};
     function esc(v){const d=document.createElement('div');d.textContent=String(v||'');return d.innerHTML;}
+function fmtGB(bytes){return (Number(bytes||0)/1024/1024/1024).toFixed(2)}
+function loadStorageUsage(){
+ fetch('/b2-usage',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+   const text=document.getElementById('storageText'),fill=document.getElementById('storageFill');
+   if(!j.ok){text.textContent='تعذر قراءة المساحة الآن';fill.style.width='0%';return}
+   text.textContent='المستخدم '+fmtGB(j.bytes)+' GB من 10 GB — المتبقي '+fmtGB(j.remaining_bytes)+' GB — '+j.files+' ملف';
+   fill.style.width=Math.max(1,Math.min(100,Number(j.percent||0)))+'%';
+ }).catch(()=>{document.getElementById('storageText').textContent='تعذر قراءة المساحة الآن'});
+}
+loadStorageUsage();
     function renderJob(j){
       const rows=(j.results||[]).map(function(x){const fn=x[0],v=x[1],s=x[2],u=x[3];const label=(s==='exists'||s==='skipped')?'♻️ موجود مسبقًا — تم تخطيه':'✅ تم رفعه وربطه';return '<div style="margin:9px 0;padding:9px 0;border-bottom:1px solid #385044"><b>'+esc(v)+'</b> — '+label+'<br><a style="color:#ffd982" href="'+esc(u)+'">'+esc(fn)+'</a></div>';}).join('');
       const errs=(j.errors||[]).map(esc).join('<br>');
@@ -470,6 +482,65 @@ def b2_authorize():
 
 def b2_file_url(file_name, auth_data):
     return f"{auth_data['downloadUrl'].rstrip('/')}/file/{quote(auth_data['_bucket_name'],safe='')}/{quote(file_name,safe='/')}"
+
+def b2_storage_usage():
+    now=time.time()
+    with B2_USAGE_LOCK:
+        if B2_USAGE_CACHE.get('at',0)>now-30:
+            return dict(B2_USAGE_CACHE)
+
+    auth_data=b2_authorize()
+    if not auth_data:
+        raise RuntimeError('Backblaze غير مربوط')
+
+    total_bytes=0
+    total_files=0
+    start_name=None
+    start_id=None
+    while True:
+        payload={'bucketId':auth_data['_bucket_id'],'maxFileCount':1000}
+        if start_name:
+            payload['startFileName']=start_name
+        if start_id:
+            payload['startFileId']=start_id
+        r=requests.post(
+            f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_list_file_versions",
+            headers={'Authorization':auth_data['authorizationToken']},
+            json=payload,timeout=45
+        )
+        if r.status_code!=200:
+            raise RuntimeError(f'Backblaze usage HTTP {r.status_code}: {r.text[:300]}')
+        data=r.json() or {}
+        for item in data.get('files') or []:
+            if item.get('action') in ('upload','copy'):
+                total_bytes += int(item.get('contentLength') or 0)
+                total_files += 1
+        start_name=data.get('nextFileName')
+        start_id=data.get('nextFileId')
+        if not start_name:
+            break
+
+    row={'at':now,'bytes':total_bytes,'files':total_files}
+    with B2_USAGE_LOCK:
+        B2_USAGE_CACHE.update(row)
+    return row
+
+@app.get('/b2-usage')
+def b2_usage():
+    try:
+        usage=b2_storage_usage()
+        free_bytes=10*1024*1024*1024
+        used=int(usage.get('bytes') or 0)
+        return jsonify(
+            ok=True,
+            bytes=used,
+            files=int(usage.get('files') or 0),
+            free_bytes=free_bytes,
+            remaining_bytes=max(0,free_bytes-used),
+            percent=min(100,round((used/free_bytes)*100,1)) if free_bytes else 0
+        )
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),200
 
 def b2_existing_url(file_name):
     auth_data=b2_authorize()
@@ -854,7 +925,12 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 .fill{height:100%;width:5%;background:#8f7cff;transition:width .2s}.muted{color:#aaa;font-size:13px}
 </style>
 <div class=c><h2>نبراس | إزالة الموسيقى بالـ GPU</h2>
-<p>ارفع الصوت الخام، وسيتم فصل الموسيقى على RunPod ثم رفع الصوت النظيف إلى GitHub وربطه تلقائيًا في <b>audio-map.json</b>.</p>
+<div id=storageUsage class=job style="margin-top:0">
+  <b>مساحة الصوتيات — Backblaze B2</b>
+  <div id=storageText class=muted style="margin-top:7px">جاري حساب المساحة...</div>
+  <div class=bar><div id=storageFill class=fill style="width:0%"></div></div>
+</div>
+<p>ارفع الصوت الخام، وسيتم فصل الموسيقى على RunPod ثم رفع الصوت النظيف وربطه تلقائيًا في <b>audio-map.json</b>.</p>
 <form id=f enctype=multipart/form-data>
 <label>مجلد المسلسل</label><input name=series placeholder="مثال: mshmsh" required>
 <label>الملفات</label><input type=file name=file multiple required accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,.mp4,.webm,.zip,audio/*,video/mp4,application/zip">
@@ -892,7 +968,7 @@ function poll(id){
    let p=8,label='بانتظار RunPod...';
    if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
-   if(j.status==='done'){p=100;label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث audio-map.json ✅')}
+   if(j.status==='done'){p=100;label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث audio-map.json ✅');loadStorageUsage()}
    if(j.status==='failed'){p=100;label='فشل ❌'}
    box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div><div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
    if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
