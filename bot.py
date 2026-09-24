@@ -2,7 +2,7 @@ import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, h
 from pathlib import Path
 from urllib.parse import quote
 import requests
-from flask import Flask, request, render_template_string, jsonify, send_file
+from flask import Flask, request, render_template_string, jsonify, send_file, Response
 
 WORK=Path('/tmp/nibras'); D=WORK/'downloads'; S=WORK/'separated'; O=WORK/'output'; QDIR=WORK/'queued'
 for p in (D,S,O,QDIR): p.mkdir(parents=True,exist_ok=True)
@@ -842,6 +842,18 @@ def gpu_clean_status(job_id):
     for k in ('source','source_url','token','remote_job_id'):row.pop(k,None)
     return jsonify(ok=True,**row)
 
+
+@app.get('/compare-clean/<vid>')
+def compare_clean(vid):
+    try:
+        mapping=load_audio_map()
+        url=mapping.get(vid,'')
+        if not url:return 'not found',404
+        r=requests.get(url,timeout=120)
+        if r.status_code!=200:return f'upstream {r.status_code}',502
+        return Response(r.content,mimetype=r.headers.get('content-type','audio/mp4'))
+    except Exception as e:
+        return str(e),500
 
 @app.get('/audio-status')
 def audio_status():
