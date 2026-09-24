@@ -782,6 +782,23 @@ def gpu_clean():
                 try:source.unlink()
                 except:pass
                 continue
+            try:
+                existing_path, existing_url = series_existing(vid, series)
+                if existing_url:
+                    try: source.unlink()
+                    except: pass
+                    skipped_id=uuid.uuid4().hex
+                    with RUNPOD_JOBS_LOCK:
+                        RUNPOD_JOBS[skipped_id]={
+                            'job_id':skipped_id,'id':vid,'filename':original,'series':series,
+                            'status':'done','stage':'skipped','url':existing_url,'error':'',
+                            'result':'exists','created_at':time.time(),'updated_at':time.time(),
+                            'finished_at':time.time()
+                        }
+                    queued.append(skipped_id)
+                    continue
+            except Exception as e:
+                log(f'gpu duplicate check failed {vid}: {e}')
             job_id=uuid.uuid4().hex
             token=uuid.uuid4().hex+uuid.uuid4().hex
             source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
