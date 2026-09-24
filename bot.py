@@ -665,6 +665,20 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <script>
 const f=document.getElementById('f'),b=document.getElementById('b'),msg=document.getElementById('msg'),jobs=document.getElementById('jobs'),uploadWrap=document.getElementById('uploadWrap'),uploadFill=document.getElementById('uploadFill'),uploadPct=document.getElementById('uploadPct'),uploadLabel=document.getElementById('uploadLabel');
 function esc(v){const d=document.createElement('div');d.textContent=String(v||'');return d.innerHTML;}
+function pollBatch(id){
+ const box=document.createElement('div');box.className='job';box.innerHTML='<b>ملف ZIP</b><div class=muted>جاري تجهيز الملفات...</div><div class=bar><div class=fill style="width:20%"></div></div>';jobs.prepend(box);
+ const tick=()=>fetch('/gpu-clean-status/'+id).then(r=>r.json()).then(j=>{
+   if(!j.ok){setTimeout(tick,2000);return}
+   if(j.status==='failed'){box.innerHTML='<div class=err>فشل فك ZIP: '+esc(j.error||'خطأ')+'</div>';return}
+   if(j.status==='done'){
+     box.innerHTML='<div class=ok>تم فك ZIP وتجهيز '+(j.count||0)+' ملف ✅</div>';
+     (j.jobs||[]).forEach(poll);return;
+   }
+   box.querySelector('.muted').textContent='جاري فك ZIP وتجهيز الملفات...';
+   setTimeout(tick,2000);
+ }).catch(()=>setTimeout(tick,2500));
+ tick();
+}
 function poll(id){
  fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(r=>r.json()).then(j=>{
    let box=document.getElementById('j_'+id); if(!box){box=document.createElement('div');box.className='job';box.id='j_'+id;jobs.appendChild(box);}
@@ -682,7 +696,7 @@ f.addEventListener('submit',e=>{
  const x=new XMLHttpRequest();x.open('POST','/gpu-clean',true);
  uploadWrap.style.display='block';uploadFill.style.width='0%';uploadPct.textContent='0%';uploadLabel.textContent='جاري رفع الملفات...';
  x.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.max(0,Math.min(100,Math.round((e.loaded/e.total)*100)));uploadFill.style.width=p+'%';uploadPct.textContent=p+'%';if(p>=100)uploadLabel.textContent='اكتمل الرفع — جاري تجهيز المهام...';}};
- x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){uploadFill.style.width='100%';uploadPct.textContent='100%';uploadLabel.textContent='تم رفع الملفات بنجاح ✅';msg.innerHTML='<div class=ok>تم الاستلام ✅ تابع حالة كل ملف بالأسفل؛ عند النهاية سيظهر تأكيد تحديث audio-map.json.</div>';(j.jobs||[]).forEach(poll);return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
+ x.onload=()=>{b.disabled=false;try{const j=JSON.parse(x.responseText);if(x.status===202&&j.ok){uploadFill.style.width='100%';uploadPct.textContent='100%';uploadLabel.textContent='تم رفع الملفات بنجاح ✅';msg.innerHTML='<div class=ok>تم الاستلام ✅ '+(j.zip_background?'جاري فك الملف المضغوط وتجهيز المهام بالخلفية.':'تابع حالة كل ملف بالأسفل؛ عند النهاية سيظهر تأكيد تحديث audio-map.json.')+'</div>';if(j.batch_id){pollBatch(j.batch_id)}else{(j.jobs||[]).forEach(poll)}return;}msg.innerHTML='<div class=err>'+esc(j.error||'تعذر بدء المعالجة')+'</div>';}catch(e){msg.innerHTML='<div class=err>استجابة غير متوقعة من الخادم</div>';}};
  x.onerror=()=>{b.disabled=false;msg.innerHTML='<div class=err>تعذر الاتصال بالخادم</div>'};
  x.send(new FormData(f));
 });
@@ -748,6 +762,66 @@ def runpod_process_job(job_id):
             except:pass
 
 @app.route('/gpu-clean',methods=['GET','POST'])
+
+def _enqueue_gpu_source(original, source, series, base_url):
+    vid=_derive_video_id('',original)
+    if not vid:
+        try: source.unlink()
+        except: pass
+        return None
+    try:
+        existing_path, existing_url = series_existing(vid, series)
+        if existing_url:
+            try: source.unlink()
+            except: pass
+            skipped_id=uuid.uuid4().hex
+            with RUNPOD_JOBS_LOCK:
+                RUNPOD_JOBS[skipped_id]={
+                    'job_id':skipped_id,'id':vid,'filename':original,'series':series,
+                    'status':'done','stage':'skipped','url':existing_url,'error':'',
+                    'result':'exists','created_at':time.time(),'updated_at':time.time(),
+                    'finished_at':time.time()
+                }
+            return skipped_id
+    except Exception as e:
+        log(f'gpu duplicate check failed {vid}: {e}')
+    job_id=uuid.uuid4().hex
+    token=uuid.uuid4().hex+uuid.uuid4().hex
+    source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
+    row={'job_id':job_id,'id':vid,'filename':original,'series':series,'source':str(source),
+         'source_url':source_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
+         'created_at':time.time(),'updated_at':time.time()}
+    with RUNPOD_JOBS_LOCK: RUNPOD_JOBS[job_id]=row
+    threading.Thread(target=runpod_process_job,args=(job_id,),daemon=True,name=f'gpu-{job_id[:8]}').start()
+    return job_id
+
+def _process_gpu_zip(zpath, series, base_url, batch_id):
+    jobs=[]
+    try:
+        with zipfile.ZipFile(zpath,'r') as z:
+            for info in z.infolist():
+                if info.is_dir(): continue
+                original=Path(info.filename).name
+                ext=Path(original).suffix.lower()
+                if ext not in RUNPOD_AUDIO_EXTS: continue
+                dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{ext}'
+                with z.open(info,'r') as src, open(dst,'wb') as out:
+                    shutil.copyfileobj(src,out)
+                jid=_enqueue_gpu_source(original,dst,series,base_url)
+                if jid: jobs.append(jid)
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            row.update(status='done',stage='expanded',jobs=jobs,count=len(jobs),updated_at=time.time(),finished_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+    except Exception as e:
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            row.update(status='failed',stage='zip_error',error=str(e),updated_at=time.time(),finished_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+    finally:
+        try: zpath.unlink()
+        except: pass
+
 def gpu_clean():
     if request.method=='GET':
         return render_template_string(GPU_CLEAN_HTML)
@@ -759,66 +833,36 @@ def gpu_clean():
     if not uploaded:return jsonify(ok=False,error='اختر ملفًا واحدًا على الأقل'),400
 
     base_url=request.host_url.rstrip('/')
+
+    if len(uploaded)==1 and Path(uploaded[0].filename or '').suffix.lower()=='.zip':
+        incoming=uploaded[0]
+        batch_id=uuid.uuid4().hex
+        zpath=QDIR/f'gpu_zip_{batch_id}.zip'
+        incoming.save(zpath)
+        with RUNPOD_JOBS_LOCK:
+            RUNPOD_JOBS[batch_id]={
+                'job_id':batch_id,'filename':incoming.filename,'series':series,
+                'status':'queued','stage':'expanding_zip','jobs':[],'count':0,
+                'created_at':time.time(),'updated_at':time.time()
+            }
+        threading.Thread(
+            target=_process_gpu_zip,
+            args=(zpath,series,base_url,batch_id),
+            daemon=True,
+            name=f'gpu-zip-{batch_id[:8]}'
+        ).start()
+        return jsonify(ok=True,status='queued',batch_id=batch_id,jobs=[],count=0,zip_background=True),202
+
     queued=[]
-    expanded=[]
-    temp_zip_paths=[]
-    try:
-        for incoming in uploaded:
-            suffix=Path(incoming.filename or '').suffix.lower()
-            if suffix=='.zip':
-                zpath=QDIR/f'gpu_zip_{uuid.uuid4().hex}.zip'
-                incoming.save(zpath); temp_zip_paths.append(zpath)
-                with zipfile.ZipFile(zpath,'r') as z:
-                    for info in z.infolist():
-                        if info.is_dir():continue
-                        original=Path(info.filename).name
-                        ext=Path(original).suffix.lower()
-                        if ext not in RUNPOD_AUDIO_EXTS:continue
-                        dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{ext}'
-                        with z.open(info,'r') as src,open(dst,'wb') as out:shutil.copyfileobj(src,out)
-                        expanded.append((original,dst))
-            else:
-                if suffix not in RUNPOD_AUDIO_EXTS:
-                    continue
-                dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{suffix or ".source"}'
-                incoming.save(dst)
-                expanded.append((incoming.filename,dst))
-        for original,source in expanded:
-            vid=_derive_video_id('',original)
-            if not vid:
-                try:source.unlink()
-                except:pass
-                continue
-            try:
-                existing_path, existing_url = series_existing(vid, series)
-                if existing_url:
-                    try: source.unlink()
-                    except: pass
-                    skipped_id=uuid.uuid4().hex
-                    with RUNPOD_JOBS_LOCK:
-                        RUNPOD_JOBS[skipped_id]={
-                            'job_id':skipped_id,'id':vid,'filename':original,'series':series,
-                            'status':'done','stage':'skipped','url':existing_url,'error':'',
-                            'result':'exists','created_at':time.time(),'updated_at':time.time(),
-                            'finished_at':time.time()
-                        }
-                    queued.append(skipped_id)
-                    continue
-            except Exception as e:
-                log(f'gpu duplicate check failed {vid}: {e}')
-            job_id=uuid.uuid4().hex
-            token=uuid.uuid4().hex+uuid.uuid4().hex
-            source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
-            row={'job_id':job_id,'id':vid,'filename':original,'series':series,'source':str(source),
-                 'source_url':source_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
-                 'created_at':time.time(),'updated_at':time.time()}
-            with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
-            threading.Thread(target=runpod_process_job,args=(job_id,),daemon=True,name=f'gpu-{job_id[:8]}').start()
-            queued.append(job_id)
-    finally:
-        for p in temp_zip_paths:
-            try:p.unlink()
-            except:pass
+    for incoming in uploaded:
+        suffix=Path(incoming.filename or '').suffix.lower()
+        if suffix not in RUNPOD_AUDIO_EXTS:
+            continue
+        dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{suffix or ".source"}'
+        incoming.save(dst)
+        jid=_enqueue_gpu_source(incoming.filename,dst,series,base_url)
+        if jid: queued.append(jid)
+
     if not queued:
         return jsonify(ok=False,error='لم أجد ملفات باسم يبدأ بـ Video ID صحيح'),400
     return jsonify(ok=True,status='queued',jobs=queued,count=len(queued)),202
