@@ -30,6 +30,9 @@ PUBLISH_JOBS={}
 PUBLISH_JOBS_LOCK=threading.Lock()
 RUNPOD_JOBS={}
 RUNPOD_JOBS_LOCK=threading.Lock()
+RUNPOD_QUEUE=queue.Queue()
+RUNPOD_WORKER_STARTED=False
+RUNPOD_WORKER_LOCK=threading.Lock()
 RUNPOD_AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus','.mp4','.webm'}
 
 HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
@@ -750,17 +753,24 @@ def runpod_process_job(job_id):
     source=Path(job['source']); final=None
     try:
         set_runpod_job(job_id,status='processing',stage='submit')
-        payload={'input':{'source_url':job['source_url'],'youtube_id':job['id']}}
+        callback_url=job.get('callback_url','')
+        payload={'input':{
+            'source_url':job['source_url'],
+            'youtube_id':job['id'],
+            'upload_url':callback_url
+        }}
         r=requests.post(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/run',headers=runpod_headers(),json=payload,timeout=60)
         if r.status_code>=300:
             raise RuntimeError(f'RunPod submit {r.status_code}: {r.text[:700]}')
         remote_id=(r.json() or {}).get('id')
         if not remote_id:raise RuntimeError('RunPod لم يرجع Job ID')
         set_runpod_job(job_id,remote_job_id=remote_id,stage='gpu')
-        deadline=time.time()+3600
+        deadline=time.time()+7200
         output=None
         while time.time()<deadline:
             s=requests.get(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/status/{remote_id}',headers=runpod_headers(),timeout=60)
+            if s.status_code>=500:
+                time.sleep(3); continue
             if s.status_code>=300:
                 raise RuntimeError(f'RunPod status {s.status_code}: {s.text[:700]}')
             data=s.json() or {}
@@ -770,13 +780,29 @@ def runpod_process_job(job_id):
                 break
             if status in ('FAILED','CANCELLED','TIMED_OUT'):
                 raise RuntimeError(f'RunPod انتهى بالحالة {status}: {str(data)[:900]}')
-            time.sleep(2)
+            time.sleep(3)
         if output is None:raise RuntimeError('انتهت مهلة انتظار RunPod')
-        if output.get('error'):raise RuntimeError(str(output.get('error')))
-        b64=output.get('audio_base64')
-        if not b64:raise RuntimeError('RunPod لم يرجع ملف الصوت')
-        final=O/f'gpu_{job_id}_{job["id"]}.m4a'
-        final.write_bytes(base64.b64decode(b64))
+
+        # Preferred path: worker uploads the M4A back to Railway, avoiding RunPod output-size limits.
+        for _ in range(120):
+            with RUNPOD_JOBS_LOCK:
+                latest=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+            received=latest.get('result_path')
+            if received and Path(received).exists():
+                final=Path(received)
+                break
+            time.sleep(1)
+
+        # Backward compatibility for old worker images that still return base64.
+        if final is None:
+            if output.get('error'):raise RuntimeError(str(output.get('error')))
+            b64=output.get('audio_base64')
+            if b64:
+                final=O/f'gpu_{job_id}_{job["id"]}.m4a'
+                final.write_bytes(base64.b64decode(b64))
+            else:
+                raise RuntimeError('RunPod اكتمل لكن لم يسلّم ملف الصوت')
+
         if final.stat().st_size<10000:raise RuntimeError('ملف RunPod الناتج غير مكتمل')
         set_runpod_job(job_id,status='publishing',stage='github')
         status,url=upload_series(final,job['id'],job['series'])
@@ -791,6 +817,21 @@ def runpod_process_job(job_id):
         if final:
             try:final.unlink()
             except:pass
+
+def _runpod_queue_worker():
+    while True:
+        job_id=RUNPOD_QUEUE.get()
+        try:
+            runpod_process_job(job_id)
+        finally:
+            RUNPOD_QUEUE.task_done()
+
+def ensure_runpod_worker():
+    global RUNPOD_WORKER_STARTED
+    with RUNPOD_WORKER_LOCK:
+        if RUNPOD_WORKER_STARTED:return
+        threading.Thread(target=_runpod_queue_worker,daemon=True,name='runpod-serial-worker').start()
+        RUNPOD_WORKER_STARTED=True
 
 def _enqueue_gpu_source(original, source, series, base_url):
     vid=_derive_video_id('',original)
@@ -817,11 +858,13 @@ def _enqueue_gpu_source(original, source, series, base_url):
     job_id=uuid.uuid4().hex
     token=uuid.uuid4().hex+uuid.uuid4().hex
     source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
+    callback_url=f'{base_url}/gpu-result/{job_id}?t={token}'
     row={'job_id':job_id,'id':vid,'filename':original,'series':series,'source':str(source),
-         'source_url':source_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
+         'source_url':source_url,'callback_url':callback_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
          'created_at':time.time(),'updated_at':time.time()}
     with RUNPOD_JOBS_LOCK: RUNPOD_JOBS[job_id]=row
-    threading.Thread(target=runpod_process_job,args=(job_id,),daemon=True,name=f'gpu-{job_id[:8]}').start()
+    ensure_runpod_worker()
+    RUNPOD_QUEUE.put(job_id)
     return job_id
 
 def _process_gpu_zip(zpath, series, base_url, batch_id):
@@ -955,6 +998,25 @@ def gpu_clean_chunk():
         daemon=True,name=f'gpu-zip-{batch_id[:8]}'
     ).start()
     return jsonify(ok=True,status='queued',batch_id=batch_id,zip_background=True),202
+
+@app.post('/gpu-result/<job_id>')
+def gpu_result(job_id):
+    token=(request.args.get('t') or '').strip()
+    with RUNPOD_JOBS_LOCK:
+        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not row or not token or token!=row.get('token'):
+        return jsonify(ok=False,error='not_found'),404
+    f=request.files.get('file')
+    if not f:
+        return jsonify(ok=False,error='file_required'),400
+    result_path=O/f'gpu_result_{job_id}_{row.get("id","audio")}.m4a'
+    f.save(result_path)
+    if result_path.stat().st_size<10000:
+        try:result_path.unlink()
+        except:pass
+        return jsonify(ok=False,error='result_too_small'),400
+    set_runpod_job(job_id,result_path=str(result_path),stage='received')
+    return jsonify(ok=True,size=result_path.stat().st_size),200
 
 @app.get('/gpu-source/<job_id>')
 def gpu_source(job_id):
