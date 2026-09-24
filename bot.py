@@ -746,6 +746,13 @@ def set_runpod_job(job_id, **changes):
 def runpod_headers():
     return {'Authorization':f'Bearer {RUNPOD_API_KEY}','Content-Type':'application/json'}
 
+def public_base_url():
+    proto=(request.headers.get('X-Forwarded-Proto') or request.scheme or 'https').split(',')[0].strip()
+    host=request.host
+    if host.endswith('.up.railway.app'):
+        proto='https'
+    return f'{proto}://{host}'
+
 def runpod_process_job(job_id):
     with RUNPOD_JOBS_LOCK:
         job=dict(RUNPOD_JOBS.get(job_id,{}) or {})
@@ -905,7 +912,7 @@ def gpu_clean():
     uploaded=[x for x in request.files.getlist('file') if x and x.filename]
     if not uploaded:return jsonify(ok=False,error='اختر ملفًا واحدًا على الأقل'),400
 
-    base_url=request.host_url.rstrip('/')
+    base_url=public_base_url()
 
     if len(uploaded)==1 and Path(uploaded[0].filename or '').suffix.lower()=='.zip':
         incoming=uploaded[0]
@@ -986,7 +993,7 @@ def gpu_clean_chunk():
     except:pass
 
     batch_id=uuid.uuid4().hex
-    base_url=request.host_url.rstrip('/')
+    base_url=public_base_url()
     with RUNPOD_JOBS_LOCK:
         RUNPOD_JOBS[batch_id]={
             'job_id':batch_id,'filename':filename,'series':series,
