@@ -1,0 +1,4 @@
+runpod>=1.7,<2
+demucs==4.0.1
+requests>=2.32,<3
+yt-dlp>=2025.1.1
