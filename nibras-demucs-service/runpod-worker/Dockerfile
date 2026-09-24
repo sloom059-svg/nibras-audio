@@ -1,12 +1,15 @@
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip ffmpeg git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python-is-python3 ffmpeg git ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu124 && \
     pip3 install --no-cache-dir -r requirements.txt
 
+RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_ft')"
+
 COPY handler.py .
+ENV DEMUCS_MODEL=htdemucs_ft
 CMD ["python3","-u","handler.py"]
