@@ -1469,3 +1469,130 @@ def video_status(vid):
 if __name__=='__main__':
     ensure_worker()
     app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')))
+
+
+# PAPER_CRAFTS_ONEOFF: temporary one-shot job. Remove after the DONE log is verified.
+def _paper_crafts_oneoff():
+    prefix='[PAPER_CRAFTS_ONEOFF]'
+    try:
+        time.sleep(3)
+        work=WORK/'paper_crafts_oneoff'
+        shutil.rmtree(work,ignore_errors=True)
+        work.mkdir(parents=True,exist_ok=True)
+
+        source_tpl=str(work/'source.%(ext)s')
+        source_url='https://www.youtube.com/watch?v=1ok52G7518E'
+        log(f'{prefix} downloading source 1ok52G7518E')
+        run([
+            'yt-dlp','--no-playlist','--no-warnings',
+            '-f','bestaudio[ext=m4a]/bestaudio',
+            '-o',source_tpl,source_url
+        ])
+        sources=[p for p in work.glob('source.*') if p.is_file() and not p.name.endswith('.part')]
+        if not sources:
+            raise RuntimeError('source download missing')
+        source=sources[0]
+
+        head=work/'head.wav'
+        core=work/'core.wav'
+        final=work/'background_10min.m4a'
+        run(['ffmpeg','-y','-v','error','-i',str(source),'-ss','1.242','-to','24.834','-c:a','pcm_s16le',str(head)])
+        run(['ffmpeg','-y','-v','error','-i',str(source),'-ss','3.866','-to','24.834','-c:a','pcm_s16le',str(core)])
+
+        cmd=['ffmpeg','-y','-v','error','-i',str(head)]
+        for _ in range(30):
+            cmd += ['-i',str(core)]
+        parts=[]
+        prev='0:a'
+        for i in range(1,31):
+            out=f'x{i}'
+            parts.append(f'[{prev}][{i}:a]acrossfade=d=1.498:c1=tri:c2=tri[{out}]')
+            prev=out
+        parts.append(f'[{prev}]atrim=duration=600,afade=t=out:st=598.8:d=1.2[out]')
+        cmd += ['-filter_complex',';'.join(parts),'-map','[out]','-c:a','aac','-b:a','64k',str(final)]
+        log(f'{prefix} building 10-minute seamless audio')
+        run(cmd)
+        duration=run(['ffprobe','-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',str(final)]).strip()
+        if not final.exists() or final.stat().st_size < 1000000:
+            raise RuntimeError('generated audio missing or too small')
+        log(f'{prefix} generated duration={duration} size={final.stat().st_size}')
+
+        audio_path=f'{FOLDER}/paper_crafts/background_10min.m4a' if FOLDER else 'paper_crafts/background_10min.m4a'
+        api,old=gh_get(audio_path)
+        if old:
+            audio_url=raw_url(audio_path)
+            log(f'{prefix} audio already exists {audio_path}')
+        else:
+            payload={
+                'message':'Add paper crafts shared 10-minute background audio',
+                'content':base64.b64encode(final.read_bytes()).decode(),
+                'branch':BRANCH,
+            }
+            r=requests.put(api,headers=headers(),json=payload,timeout=600)
+            if r.status_code not in (200,201):
+                raise RuntimeError(f'audio upload HTTP {r.status_code}: {r.text[:900]}')
+            audio_url=raw_url(audio_path)
+            log(f'{prefix} uploaded {audio_path}')
+
+        playlist_ids=[
+            'PLpmr9_6AkSDrV2WSWmnQtdaOmHm2y37fF',
+            'PLt8AYTPM-S8it_kpxdA_jeQMK8wARjWNA',
+        ]
+        ids=[]
+        unavailable=[]
+        for pid in playlist_ids:
+            entries=playlist_entries(pid)
+            if not entries:
+                unavailable.append(pid)
+            for row in entries:
+                vid=str(row.get('id') or '').strip()
+                if vid and vid not in ids:
+                    ids.append(vid)
+        if not ids:
+            raise RuntimeError('no playlist video ids were returned')
+
+        linked=False
+        for attempt in range(4):
+            api,old=gh_get(MAP_PATH)
+            mapping={}
+            sha=None
+            if old:
+                sha=old.get('sha')
+                try:
+                    raw=base64.b64decode(old.get('content','')).decode('utf-8')
+                    parsed=json.loads(raw)
+                    if isinstance(parsed,dict):
+                        mapping=parsed
+                except Exception:
+                    mapping={}
+            changed=False
+            for vid in ids:
+                if mapping.get(vid)!=audio_url:
+                    mapping[vid]=audio_url
+                    changed=True
+            if not changed:
+                linked=True
+                break
+            body={
+                'message':f'Link paper crafts shared audio to {len(ids)} videos',
+                'content':base64.b64encode((json.dumps(mapping,ensure_ascii=False,indent=2)+'\n').encode('utf-8')).decode(),
+                'branch':BRANCH,
+            }
+            if sha:
+                body['sha']=sha
+            r=requests.put(api,headers=headers(),json=body,timeout=120)
+            if r.status_code in (200,201):
+                linked=True
+                break
+            if r.status_code==409:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f'audio map HTTP {r.status_code}: {r.text[:900]}')
+        if not linked:
+            raise RuntimeError('audio map update conflicted repeatedly')
+
+        log(f'{prefix} DONE count={len(ids)} unavailable={json.dumps(unavailable)} url={audio_url} ids={json.dumps(ids)}')
+    except Exception as e:
+        log(f'{prefix} FAILED {repr(e)}')
+
+threading.Thread(target=_paper_crafts_oneoff,daemon=True,name='paper-crafts-oneoff').start()
