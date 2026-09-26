@@ -349,6 +349,10 @@ def _derive_video_id(value, filename):
     raw=re.sub(r'[^A-Za-z0-9_-]','',str(value or '').strip())
     if raw:return raw
     name=Path(filename or '').stem
+    # Some downloaders/exporters prefix the filename with '=' (for example
+    # =9CA1ByDM8vM.m4a). Ignore that wrapper so the 11-char YouTube ID is
+    # still detected, while preserving valid IDs that may begin with '-'/'_'.
+    name=re.sub(r'^[=+]+','',name)
 
     # LALAL may prepend sequence numbers such as:
     # 2-v2j0HEHwWNo_vocals...
