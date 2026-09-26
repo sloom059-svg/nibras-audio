@@ -965,8 +965,11 @@ function loadStorageUsage(){
 loadStorageUsage();
 function pollBatch(id){
  const box=document.createElement('div');box.className='job';box.innerHTML='<b>ملف ZIP</b><div class=muted>جاري تجهيز الملفات...</div><div class=bar><div class=fill style="width:20%"></div></div>';jobs.prepend(box);
- const tick=()=>fetch('/gpu-clean-status/'+id).then(r=>r.json()).then(j=>{
-   if(!j.ok){setTimeout(tick,2000);return}
+ const tick=()=>fetch('/gpu-clean-status/'+id).then(async r=>({status:r.status,body:await r.json()})).then(({status,body:j})=>{
+   if(!j.ok){
+     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>انقطعت حالة المهمة بسبب إعادة تشغيل الخدمة. أعد رفع ZIP بعد تحديث الصفحة.</div>';return}
+     setTimeout(tick,2000);return
+   }
    if(j.status==='failed'){box.innerHTML='<div class=err>فشل فك ZIP: '+esc(j.error||'خطأ')+'</div>';return}
    if(j.status==='done'){
      box.innerHTML='<div class=ok>تم فك ZIP وتجهيز '+(j.count||0)+' ملف ✅</div>';
@@ -978,8 +981,12 @@ function pollBatch(id){
  tick();
 }
 function poll(id){
- fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(r=>r.json()).then(j=>{
+ fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(async r=>({status:r.status,body:await r.json()})).then(({status,body:j})=>{
    let box=document.getElementById('j_'+id); if(!box){box=document.createElement('div');box.className='job';box.id='j_'+id;jobs.appendChild(box);}
+   if(!j.ok){
+     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>المهمة لم تعد موجودة بعد إعادة تشغيل الخدمة. حدّث الصفحة وأعد رفع الملف.</div>';return}
+     box.innerHTML='<div class=err>'+esc(j.error||'تعذر قراءة حالة المهمة')+'</div>';return;
+   }
    let p=8,label='بانتظار RunPod...';
    if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
