@@ -419,6 +419,88 @@ def _derive_video_id(value, filename):
     m=re.match(r'^([A-Za-z0-9_-]{11})(?=(?:\s*\(\d+\))?(?:_|$|\s))',name)
     return m.group(1) if m else ''
 
+def _archive_actual_key(filename):
+    import unicodedata
+    name=Path(str(filename or '')).name
+    stem=Path(name).stem
+    stem=unicodedata.normalize('NFC',stem.strip())
+    if not stem:return ''
+    return 'ia_'+hashlib.sha1(stem.encode('utf-8')).hexdigest()[:20]
+
+def _archive_match_name(filename):
+    import unicodedata
+    name=Path(str(filename or '')).name
+    name=unicodedata.normalize('NFKC',name)
+    # Remove the uploaded audio extension first.
+    name=re.sub(r'(?i)\.(m4a|aac|mp3|wav|flac|ogg|opus)$','',name)
+    # Remove common LALAL/export suffixes and browser duplicate markers.
+    name=re.sub(r'(?i)_vocals_split_by_lalalai$','',name)
+    name=re.sub(r'(?i)_vocals$','',name)
+    name=re.sub(r'\s*\(\d+\)$','',name)
+    # If the audio came from a video download, remove that nested video extension too.
+    name=re.sub(r'(?i)\.(mp4|m4v|webm|mkv|ogv)$','',name)
+    return ''.join(ch for ch in name.casefold() if ch.isalnum())
+
+ARCHIVE_MATCH_CACHE={'at':0,'files':[]}
+ARCHIVE_MATCH_LOCK=threading.Lock()
+
+def _archive_catalog_files():
+    now=time.time()
+    with ARCHIVE_MATCH_LOCK:
+        if ARCHIVE_MATCH_CACHE.get('at',0)>now-600 and ARCHIVE_MATCH_CACHE.get('files'):
+            return list(ARCHIVE_MATCH_CACHE['files'])
+
+    catalog_url='https://raw.githubusercontent.com/sloom059-svg/nibras-catalog/main/islamic-catalog/catalog.json'
+    r=requests.get(catalog_url,timeout=20,headers={'Cache-Control':'no-cache'})
+    r.raise_for_status()
+    catalog=r.json() or {}
+    identifiers=[]
+    for section in catalog.get('sections') or []:
+        for item in section.get('items') or []:
+            if str(item.get('source') or '').lower()=='archive':
+                ident=str(item.get('contentId') or '').strip()
+                if ident and ident not in identifiers: identifiers.append(ident)
+
+    rows=[]
+    for ident in identifiers:
+        try:
+            meta=requests.get(f'https://archive.org/metadata/{quote(ident,safe="")}',timeout=25,
+                              headers={'User-Agent':'Nibras/1.0'}).json() or {}
+            files=meta.get('files') or []
+            originals=[]; fallback=[]
+            for item in files:
+                if not isinstance(item,dict): continue
+                name=str(item.get('name') or '').strip()
+                lower=name.lower()
+                if not lower.endswith(('.mp4','.m4v','.webm','.mkv','.ogv')): continue
+                if any(x in lower for x in ('_512kb','thumb','sample')): continue
+                row={'identifier':ident,'name':name,'key':_archive_actual_key(name)}
+                fallback.append(row)
+                if str(item.get('source') or '').lower()=='original': originals.append(row)
+            rows.extend(originals or fallback)
+        except Exception as e:
+            log(f'Archive metadata match warning {ident}: {e}')
+
+    with ARCHIVE_MATCH_LOCK:
+        ARCHIVE_MATCH_CACHE['at']=now
+        ARCHIVE_MATCH_CACHE['files']=list(rows)
+    return rows
+
+def _archive_resolve_key(filename):
+    wanted=_archive_match_name(filename)
+    if wanted:
+        rows=_archive_catalog_files()
+        exact=[r for r in rows if _archive_match_name(r['name'])==wanted]
+        if len(exact)==1:
+            return exact[0]['key']
+        # Safe fallback for exports that prepend/append a little metadata:
+        # only accept a unique containment match and require a meaningful basename.
+        if len(wanted)>=12:
+            fuzzy=[r for r in rows if wanted in _archive_match_name(r['name']) or _archive_match_name(r['name']) in wanted]
+            if len(fuzzy)==1:
+                return fuzzy[0]['key']
+    return _archive_actual_key(filename)
+
 def _derive_publish_id(value, filename, map_target='youtube'):
     target=_map_target(map_target)
     if target=='youtube':
@@ -434,13 +516,9 @@ def _derive_publish_id(value, filename, map_target='youtube'):
         m=re.match(r'^(x[A-Za-z0-9]{5,})(?=(?:\s*\(\d+\))?(?:_|$|\s|-))',name,re.I)
         return m.group(1) if m else ''
 
-    # Archive.org: derive a stable, filesystem-safe key from the original episode filename.
-    # The app uses the exact same SHA-1 rule, so Arabic/spaces are handled without manual IDs.
     if raw.startswith('ia_') and re.fullmatch(r'ia_[a-f0-9]{20}',raw,re.I):
         return raw.lower()
-    import unicodedata
-    name=Path(filename or '').stem
-    name=re.sub(r'\s*\(\d+\)
+    return _archive_resolve_key(filename)
 
 def series_slug(value):
     value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
