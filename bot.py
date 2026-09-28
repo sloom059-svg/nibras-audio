@@ -1498,6 +1498,47 @@ def compare_clean(vid):
     except Exception as e:
         return str(e),500
 
+@app.get('/archive-item/<identifier>')
+def archive_item(identifier):
+    ident=str(identifier or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,200}',ident):
+        return jsonify(ok=False,error='invalid_identifier'),400
+    try:
+        r=requests.get(f'https://archive.org/metadata/{quote(ident,safe="")}',timeout=30,headers={'User-Agent':'Nibras/1.0'})
+        if r.status_code!=200:
+            return jsonify(ok=False,error=f'archive_http_{r.status_code}'),502
+        root=r.json() or {}
+        meta=root.get('metadata') or {}
+        files=root.get('files') or []
+        originals=[]; fallback=[]
+        for item in files:
+            if not isinstance(item,dict): continue
+            name=str(item.get('name') or '').strip()
+            lower=name.lower()
+            if not lower.endswith(('.mp4','.m4v','.webm','.ogv','.mkv')): continue
+            if any(x in lower for x in ('_512kb','thumb','sample')): continue
+            row={
+                'name':name,
+                'title':str(item.get('title') or '').strip(),
+                'length':item.get('length') or item.get('duration') or '',
+                'source':str(item.get('source') or '').strip(),
+                'url':f'https://archive.org/download/{quote(ident,safe="")}/{quote(name,safe="/")}'
+            }
+            fallback.append(row)
+            if row['source'].lower()=='original': originals.append(row)
+        chosen=originals or fallback
+        return jsonify(
+            ok=True,
+            identifier=ident,
+            title=meta.get('title') or ident,
+            creator=meta.get('creator') or 'Archive.org',
+            image=f'https://archive.org/services/img/{quote(ident,safe="")}',
+            count=len(chosen),
+            files=chosen
+        )
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)[-600:]),502
+
 @app.get('/audio-status')
 def audio_status():
     supplied=''
