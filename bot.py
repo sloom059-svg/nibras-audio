@@ -798,7 +798,7 @@ def publish_zip_path(archive, series, map_target='youtube', job_id=None):
                 set_publish_job(job_id,status='processing',stage='extracting',total=total,done=0,results=[],errors=[])
             for index,info in enumerate(items,1):
                 original=Path(info.filename).name
-                vid=_derive_video_id('',original)
+                vid=_derive_publish_id('',original,map_target)
                 if not vid:
                     errors.append(f'{info.filename}: تعذر معرفة Video ID من اسم الملف')
                     if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
