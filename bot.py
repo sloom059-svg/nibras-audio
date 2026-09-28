@@ -354,7 +354,7 @@ function loadStorageUsage(){
 loadStorageUsage();
     function renderJob(j){
       const rows=(j.results||[]).map(function(x){const fn=x[0],v=x[1],s=x[2],u=x[3];const label=(s==='exists'||s==='skipped')?'♻️ موجود مسبقًا — تم تخطيه':'✅ تم رفعه وربطه';return '<div style="margin:9px 0;padding:9px 0;border-bottom:1px solid #385044"><b>'+esc(v)+'</b> — '+label+'<br><a style="color:#ffd982" href="'+esc(u)+'">'+esc(fn)+'</a></div>';}).join('');
-      const errs=(j.errors||[]).map(esc).join('<br>');
+      const errs=(j.errors||[]).map(function(e){return '❌ '+esc(e);}).join('<br>');
       const uploaded=(j.results||[]).filter(x=>x[2]==='uploaded'||x[2]==='published').length;
       const existing=(j.results||[]).filter(x=>x[2]==='exists'||x[2]==='skipped').length;
       result.innerHTML=(rows?'<div class="ok">تم رفع '+uploaded+' جديد'+(existing?' — وتخطي '+existing+' موجود مسبقًا':'')+' ✅'+rows+'</div>':'')+(errs?'<div class="err">'+errs+'</div>':'');
@@ -367,7 +367,8 @@ loadStorageUsage();
         bar.style.width=p+'%';pct.textContent=p+'%';
         txt.textContent=j.status==='queued'?'تم الاستلام — بانتظار المعالجة...':'جاري معالجة '+done+(total?' من '+total:'')+'...';
         note.textContent=j.current?('الملف الحالي: '+j.current):'يمكنك إبقاء الصفحة مفتوحة لمتابعة النتيجة.';
-        if(j.status==='done'){btn.disabled=false;bar.style.width='100%';pct.textContent='100%';txt.textContent='اكتمل ✅';note.textContent='انتهت العملية. راجع النتائج أدناه.';renderJob(j);return;}
+        renderJob(j);
+        if(j.status==='done'){btn.disabled=false;bar.style.width='100%';pct.textContent='100%';txt.textContent='اكتمل ✅';note.textContent='انتهت العملية. راجع نتيجة كل ملف أدناه.';return;}
         if(j.status==='failed'){btn.disabled=false;txt.textContent='فشلت المعالجة';note.textContent=j.error||'حدث خطأ';result.innerHTML='<div class="err">'+esc(j.error||'تعذر إكمال المعالجة')+'</div>';return;}
         setTimeout(()=>pollJob(jobId),2000);
       }).catch(function(){setTimeout(()=>pollJob(jobId),3000);});
