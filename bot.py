@@ -1498,6 +1498,28 @@ def compare_clean(vid):
     except Exception as e:
         return str(e),500
 
+@app.get('/archive-debug/<identifier>')
+def archive_debug(identifier):
+    ident=str(identifier or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,200}',ident):
+        return jsonify(ok=False,error='invalid_identifier'),400
+    try:
+        r=requests.get('https://archive.org/metadata/'+quote(ident,safe=''),timeout=30,headers={'User-Agent':'Nibras/1.0'})
+        if r.status_code!=200:
+            return jsonify(ok=False,error='archive_http_'+str(r.status_code)),502
+        root=r.json() or {}
+        files=[]
+        for item in root.get('files') or []:
+            if not isinstance(item,dict):
+                continue
+            name=str(item.get('name') or '').strip()
+            if not name.lower().endswith(('.mp4','.m4v','.webm','.mkv','.ogv')):
+                continue
+            files.append({'name':name,'title':str(item.get('title') or '').strip(),'source':str(item.get('source') or '').strip()})
+        return jsonify(ok=True,identifier=ident,files=files)
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),502
+
 @app.get('/audio-status')
 def audio_status():
     supplied=''
