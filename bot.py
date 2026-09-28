@@ -1080,7 +1080,7 @@ function poll(id){
    let p=8,label='بانتظار RunPod...';
    if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
-   if(j.status==='done'){p=100;label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث audio-map.json ✅');loadStorageUsage()}
+   if(j.status==='done'){p=100;const mapName=j.map_target==='archive'?'archive-audio-map.json':(j.map_target==='dailymotion'?'dailymotion-audio-map.json':'audio-map.json');label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث '+mapName+' ✅');loadStorageUsage()}
    if(j.status==='failed'){p=100;label='فشل ❌'}
    box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div><div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
    if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
