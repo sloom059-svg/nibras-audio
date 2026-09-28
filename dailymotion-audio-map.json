@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "provider": "dailymotion",
+  "description": "Independent Dailymotion audio bindings. Existing audio-map.json remains untouched.",
+  "audio": {}
+}
