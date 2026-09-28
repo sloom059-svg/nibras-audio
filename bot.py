@@ -14,6 +14,7 @@ FOLDER=os.getenv('GITHUB_FOLDER','processed-audio').strip().strip('/')
 UPLOAD_KEY=os.getenv('UPLOAD_KEY','').strip()
 PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
+DAILYMOTION_MAP_PATH=os.getenv('DAILYMOTION_AUDIO_MAP_PATH','dailymotion-audio-map.json').strip().strip('/') or 'dailymotion-audio-map.json'
 RUNPOD_API_KEY=os.getenv('RUNPOD_API_KEY','').strip()
 RUNPOD_ENDPOINT_ID=os.getenv('RUNPOD_ENDPOINT_ID','').strip()
 B2_KEY_ID=os.getenv('B2_KEY_ID','').strip()
@@ -107,10 +108,44 @@ def update_audio_map_url(vid, url):
 def update_audio_map(vid, path):
     return update_audio_map_url(vid, raw_url(path))
 
+def _map_target(value):
+    return 'dailymotion' if str(value or '').strip().lower()=='dailymotion' else 'youtube'
+
+def update_selected_audio_map_url(vid, url, map_target='youtube'):
+    target=_map_target(map_target)
+    if target=='youtube':
+        return update_audio_map_url(vid,url)
+    api,old=gh_get(DAILYMOTION_MAP_PATH)
+    wrapper={'version':1,'provider':'dailymotion','description':'Independent Dailymotion audio bindings. Existing audio-map.json remains untouched.','audio':{}}
+    sha=None
+    if old:
+        sha=old.get('sha')
+        try:
+            content=base64.b64decode(old.get('content','')).decode('utf-8')
+            obj=json.loads(content)
+            if isinstance(obj,dict):
+                wrapper.update({k:v for k,v in obj.items() if k!='audio'})
+                if isinstance(obj.get('audio'),dict): wrapper['audio']=dict(obj['audio'])
+        except Exception:
+            pass
+    if wrapper['audio'].get(vid)==url:
+        return url
+    wrapper['audio'][vid]=url
+    body={
+        'message':f'Update dailymotion audio map {vid}',
+        'content':base64.b64encode((json.dumps(wrapper,ensure_ascii=False,indent=2)+'\n').encode('utf-8')).decode(),
+        'branch':BRANCH,
+    }
+    if sha: body['sha']=sha
+    r=requests.put(api,headers=headers(),json=body,timeout=60)
+    if r.status_code not in (200,201):
+        raise RuntimeError(f'GitHub Dailymotion map update {r.status_code}: {r.text[:900]}')
+    return url
+
 def upload(file,vid):
     path,api,old=gh_info(vid)
     if old:
-        return 'skipped', update_audio_map(vid,path)
+        return 'skipped', update_selected_audio_map_url(vid,raw_url(path),map_target)
     data=base64.b64encode(Path(file).read_bytes()).decode()
     r=requests.put(api,headers=headers(),json={'message':f'Add cleaned audio {vid}','content':data,'branch':BRANCH},timeout=240)
     if r.status_code not in (200,201):
@@ -259,8 +294,8 @@ CLEAN_HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><me
 body{font-family:Arial;background:#15171b;color:#fff;max-width:720px;margin:30px auto;padding:18px}
 .c{background:#22262c;padding:24px;border-radius:18px}
 label{display:block;margin:14px 0 7px;font-weight:700}
-input,button{width:100%;padding:13px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:16px}
-input{background:#111;color:#fff}button{margin-top:18px;background:#f6c35f;color:#162436;font-weight:900;cursor:pointer}
+input,select,button{width:100%;padding:13px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:16px}
+input,select{background:#111;color:#fff}button{margin-top:18px;background:#f6c35f;color:#162436;font-weight:900;cursor:pointer}
 button:disabled{opacity:.55;cursor:not-allowed}
 small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-top:16px}.err{background:#4b1d23;padding:12px;border-radius:10px;margin-top:16px}
 .progressWrap{display:none;margin-top:18px;background:#111;border:1px solid #3b4149;border-radius:12px;padding:13px}
@@ -279,6 +314,12 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <small>أي ملف موجود مسبقًا داخل نفس مجلد المسلسل سيتم التعرف عليه وتخطيه بدون رفع أو تحويل من جديد.</small>
 <label>ملفات الصوت الجاهزة</label><input type=file name=file accept=".zip,.m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,audio/mp4,audio/x-m4a,audio/aac,audio/mpeg,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/opus,application/zip" multiple required>
 <small>يدعم ZIP و M4A و AAC و MP3 و WAV و FLAC و OGG و OPUS، ويدعم لاحقة (1) و(2) وغيرها بعد Video ID.</small>
+<label>الماب الذي سيتم الربط فيه بعد الرفع</label>
+<select name=map_target required>
+  <option value="youtube" selected>الماب العادي (YouTube)</option>
+  <option value="dailymotion">ماب Dailymotion</option>
+</select>
+<small>اختيار الماب لا يغيّر التخزين؛ فقط يحدد ملف الربط الذي يضاف إليه الـ ID بعد نجاح الرفع.</small>
 <button id=submitBtn type=submit>رفع وربط الآن</button>
 </form>
 <div id=progressWrap class=progressWrap>
@@ -368,16 +409,16 @@ def series_slug(value):
     value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
     return value or 'general'
 
-def series_existing(vid, series):
+def series_existing(vid, series, map_target='youtube'):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
     if B2_KEY_ID and B2_APPLICATION_KEY:
         b2url=b2_existing_url(path)
         if b2url:
-            return path, update_audio_map_url(vid,b2url)
+            return path, update_selected_audio_map_url(vid,b2url,map_target)
     api,old=gh_get(path)
     if old:
-        return path, update_audio_map(vid,path)
+        return path, update_selected_audio_map_url(vid,raw_url(path),map_target)
     return path, ''
 
 
@@ -603,7 +644,7 @@ if B2_KEY_ID and B2_APPLICATION_KEY:
     except Exception as e:
         log(f'Backblaze storage authorization failed: {e}')
 
-def upload_series(file,vid,series):
+def upload_series(file,vid,series,map_target='youtube'):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
     api,old=gh_get(path)
@@ -615,7 +656,7 @@ def upload_series(file,vid,series):
         result=b2_upload(file_path,path)
         if result:
             status,url=result
-            return status, update_audio_map_url(vid,url)
+            return status, update_selected_audio_map_url(vid,url,map_target)
     message=f'Add cleaned audio {folder}/{vid}'
     size=file_path.stat().st_size
 
@@ -629,7 +670,7 @@ def upload_series(file,vid,series):
                 r=requests.put(api,headers=headers(),json={'message':message,'content':data,'branch':BRANCH},timeout=300)
                 last=r
                 if r.status_code in (200,201):
-                    return 'uploaded', update_audio_map(vid,path)
+                    return 'uploaded', update_selected_audio_map_url(vid,raw_url(path),map_target)
                 if r.status_code==422 and ('too large' in (r.text or '').lower() or 'input was too large' in (r.text or '').lower()):
                     break
                 if r.status_code in (500,502,503,504):
@@ -643,11 +684,11 @@ def upload_series(file,vid,series):
                 break
 
     _git_push_upload(file_path,path,message)
-    return 'uploaded', update_audio_map(vid,path)
+    return 'uploaded', update_selected_audio_map_url(vid,raw_url(path),map_target)
 
 AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus'}
 
-def publish_clean_path(source_path, original_name, vid, series):
+def publish_clean_path(source_path, original_name, vid, series, map_target='youtube'):
     suffix=Path(original_name or source_path).suffix.lower() or '.source'
     work=QDIR/f'clean_{uuid.uuid4().hex}_{vid}{suffix}'
     final=O/f'{vid}.m4a'
@@ -663,14 +704,14 @@ def publish_clean_path(source_path, original_name, vid, series):
             run(['ffmpeg','-y','-i',str(work),'-vn','-c:a','aac','-b:a','192k',str(final)])
         if not final.exists() or final.stat().st_size<10000:
             raise RuntimeError('تعذر تجهيز ملف M4A')
-        return upload_series(final,vid,series)
+        return upload_series(final,vid,series,map_target)
     finally:
         try:work.unlink()
         except:pass
         try:final.unlink()
         except:pass
 
-def publish_zip_file(incoming, series):
+def publish_zip_file(incoming, series, map_target='youtube'):
     archive=QDIR/f'zip_{uuid.uuid4().hex}.zip'
     incoming.save(archive)
     results=[]
@@ -690,7 +731,7 @@ def publish_zip_file(incoming, series):
                     errors.append(f'{info.filename}: تعذر معرفة Video ID من اسم الملف')
                     continue
                 try:
-                    _,existing_url=series_existing(vid,series)
+                    _,existing_url=series_existing(vid,series,map_target)
                     if existing_url:
                         results.append((original,vid,'exists',existing_url))
                         continue
@@ -701,7 +742,7 @@ def publish_zip_file(incoming, series):
                 try:
                     with z.open(info,'r') as src, open(extracted,'wb') as dst:
                         shutil.copyfileobj(src,dst)
-                    status,url=publish_clean_path(extracted,original,vid,series)
+                    status,url=publish_clean_path(extracted,original,vid,series,map_target)
                     results.append((original,vid,status,url))
                 except Exception as e:
                     errors.append(f'{info.filename}: {str(e)}')
@@ -715,12 +756,12 @@ def publish_zip_file(incoming, series):
         try:archive.unlink()
         except:pass
 
-def publish_clean_file(incoming, vid, series):
+def publish_clean_file(incoming, vid, series, map_target='youtube'):
     suffix=Path(incoming.filename or '').suffix.lower() or '.source'
     source=QDIR/f'incoming_{uuid.uuid4().hex}{suffix}'
     incoming.save(source)
     try:
-        return publish_clean_path(source,incoming.filename,vid,series)
+        return publish_clean_path(source,incoming.filename,vid,series,map_target)
     finally:
         try:source.unlink()
         except:pass
@@ -732,7 +773,7 @@ def set_publish_job(job_id, **changes):
         row['updated_at']=time.time()
         PUBLISH_JOBS[job_id]=row
 
-def publish_zip_path(archive, series, job_id=None):
+def publish_zip_path(archive, series, map_target='youtube', job_id=None):
     results=[]
     errors=[]
     archive=Path(archive)
@@ -750,7 +791,7 @@ def publish_zip_path(archive, series, job_id=None):
                     if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
                     continue
                 try:
-                    _,existing_url=series_existing(vid,series)
+                    _,existing_url=series_existing(vid,series,map_target)
                     if existing_url:
                         results.append((original,vid,'exists',existing_url))
                         if job_id:set_publish_job(job_id,done=index,results=results,errors=errors,current=original)
@@ -764,7 +805,7 @@ def publish_zip_path(archive, series, job_id=None):
                     if job_id:set_publish_job(job_id,stage='publishing',current=original,done=index-1)
                     with z.open(info,'r') as src, open(extracted,'wb') as dst:
                         shutil.copyfileobj(src,dst)
-                    status,url=publish_clean_path(extracted,original,vid,series)
+                    status,url=publish_clean_path(extracted,original,vid,series,map_target)
                     results.append((original,vid,status,url))
                 except Exception as e:
                     errors.append(f'{info.filename}: {str(e)}')
@@ -779,9 +820,9 @@ def publish_zip_path(archive, series, job_id=None):
         try:archive.unlink()
         except:pass
 
-def publish_zip_background(job_id, archive, series):
+def publish_zip_background(job_id, archive, series, map_target='youtube'):
     try:
-        results,errors=publish_zip_path(archive,series,job_id)
+        results,errors=publish_zip_path(archive,series,map_target,job_id)
         set_publish_job(job_id,status='done',stage='done',results=results,errors=errors,finished_at=time.time(),current='')
         log(f'publish-clean {job_id}: done results={len(results)} errors={len(errors)}')
     except Exception as e:
@@ -804,6 +845,7 @@ def publish_clean():
     supplied=''
     vid=(request.values.get('id') or '').strip()
     series=(request.values.get('series') or '').strip()
+    map_target=_map_target(request.values.get('map_target'))
     message=''
     if request.method=='POST':
         files=[x for x in request.files.getlist('file') if x and x.filename]
@@ -824,12 +866,12 @@ def publish_clean():
                     return jsonify(ok=False,error='ملف ZIP فارغ أو غير مكتمل'),400
                 with PUBLISH_JOBS_LOCK:
                     PUBLISH_JOBS[job_id]={
-                        'job_id':job_id,'status':'queued','stage':'waiting','series':series,
+                        'job_id':job_id,'status':'queued','stage':'waiting','series':series,'map_target':map_target,
                         'filename':incoming.filename,'size':archive.stat().st_size,'total':0,'done':0,
                         'current':'','results':[],'errors':[],'error':'',
                         'created_at':time.time(),'updated_at':time.time(),'archive':str(archive)
                     }
-                threading.Thread(target=publish_zip_background,args=(job_id,archive,series),daemon=True,name=f'publish-{job_id[:8]}').start()
+                threading.Thread(target=publish_zip_background,args=(job_id,archive,series,map_target),daemon=True,name=f'publish-{job_id[:8]}').start()
                 log(f'publish-clean {job_id}: accepted zip size={archive.stat().st_size}')
                 return jsonify(ok=True,status='queued',job_id=job_id),202
 
@@ -838,7 +880,7 @@ def publish_clean():
             for incoming in files:
                 if Path(incoming.filename or '').suffix.lower()=='.zip':
                     try:
-                        zip_results,zip_errors=publish_zip_file(incoming,series)
+                        zip_results,zip_errors=publish_zip_file(incoming,series,map_target)
                         results.extend(zip_results)
                         errors.extend(zip_errors)
                     except Exception as e:
@@ -850,11 +892,11 @@ def publish_clean():
                     errors.append(f'{incoming.filename}: تعذر معرفة Video ID من اسم الملف')
                     continue
                 try:
-                    _,existing_url=series_existing(this_vid,series)
+                    _,existing_url=series_existing(this_vid,series,map_target)
                     if existing_url:
                         results.append((incoming.filename,this_vid,'exists',existing_url))
                         continue
-                    status,url=publish_clean_file(incoming,this_vid,series)
+                    status,url=publish_clean_file(incoming,this_vid,series,map_target)
                     results.append((incoming.filename,this_vid,status,url))
                 except Exception as e:
                     errors.append(f'{incoming.filename}: {str(e)}')
