@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "provider": "archive",
+  "description": "Independent Archive.org audio bindings. Existing YouTube and Dailymotion maps remain untouched.",
+  "audio": {}
+}
