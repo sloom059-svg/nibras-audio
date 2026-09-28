@@ -15,6 +15,7 @@ UPLOAD_KEY=os.getenv('UPLOAD_KEY','').strip()
 PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
 DAILYMOTION_MAP_PATH=os.getenv('DAILYMOTION_AUDIO_MAP_PATH','dailymotion-audio-map.json').strip().strip('/') or 'dailymotion-audio-map.json'
+ARCHIVE_MAP_PATH=os.getenv('ARCHIVE_AUDIO_MAP_PATH','archive-audio-map.json').strip().strip('/') or 'archive-audio-map.json'
 RUNPOD_API_KEY=os.getenv('RUNPOD_API_KEY','').strip()
 RUNPOD_ENDPOINT_ID=os.getenv('RUNPOD_ENDPOINT_ID','').strip()
 B2_KEY_ID=os.getenv('B2_KEY_ID','').strip()
@@ -109,14 +110,25 @@ def update_audio_map(vid, path):
     return update_audio_map_url(vid, raw_url(path))
 
 def _map_target(value):
-    return 'dailymotion' if str(value or '').strip().lower()=='dailymotion' else 'youtube'
+    target=str(value or '').strip().lower()
+    if target in ('dailymotion','archive'):
+        return target
+    return 'youtube'
 
 def update_selected_audio_map_url(vid, url, map_target='youtube'):
     target=_map_target(map_target)
     if target=='youtube':
         return update_audio_map_url(vid,url)
-    api,old=gh_get(DAILYMOTION_MAP_PATH)
-    wrapper={'version':1,'provider':'dailymotion','description':'Independent Dailymotion audio bindings. Existing audio-map.json remains untouched.','audio':{}}
+
+    map_path=DAILYMOTION_MAP_PATH if target=='dailymotion' else ARCHIVE_MAP_PATH
+    provider='dailymotion' if target=='dailymotion' else 'archive'
+    description=(
+        'Independent Dailymotion audio bindings. Existing audio-map.json remains untouched.'
+        if target=='dailymotion'
+        else 'Independent Archive.org audio bindings. Existing YouTube and Dailymotion maps remain untouched.'
+    )
+    api,old=gh_get(map_path)
+    wrapper={'version':1,'provider':provider,'description':description,'audio':{}}
     sha=None
     if old:
         sha=old.get('sha')
@@ -132,14 +144,14 @@ def update_selected_audio_map_url(vid, url, map_target='youtube'):
         return url
     wrapper['audio'][vid]=url
     body={
-        'message':f'Update dailymotion audio map {vid}',
+        'message':f'Update {provider} audio map {vid}',
         'content':base64.b64encode((json.dumps(wrapper,ensure_ascii=False,indent=2)+'\n').encode('utf-8')).decode(),
         'branch':BRANCH,
     }
     if sha: body['sha']=sha
     r=requests.put(api,headers=headers(),json=body,timeout=60)
     if r.status_code not in (200,201):
-        raise RuntimeError(f'GitHub Dailymotion map update {r.status_code}: {r.text[:900]}')
+        raise RuntimeError(f'GitHub {provider} map update {r.status_code}: {r.text[:900]}')
     return url
 
 def upload(file,vid):
@@ -308,7 +320,7 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <p>ارفع ملفات LALAL الجاهزة وسيتم استخراج Video ID تلقائيًا حتى لو كان الاسم مثل <b>6CBLA5W1N0I (1)_vocals_split_by_lalalai.aac</b>.</p>
 <form id=uploadForm method=post enctype=multipart/form-data>
 <input type=hidden name=k value="{{key}}">
-<label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="YouTube: aJ3zGhhMuxE أو Dailymotion: x9itz54">
+<label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="YouTube: aJ3zGhhMuxE أو Dailymotion: x9itz54 — اتركه فارغًا لـ Archive.org">
 <small>اتركه فارغًا عند رفع عدة ملفات؛ سأقرأ الـ Video ID من بداية كل اسم ملف.</small>
 <label>مجلد المسلسل</label><input name=series value="{{series}}" placeholder="مثال: barbear" required>
 <small>أي ملف موجود مسبقًا داخل نفس مجلد المسلسل سيتم التعرف عليه وتخطيه بدون رفع أو تحويل من جديد.</small>
@@ -318,6 +330,7 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <select name=map_target required>
   <option value="youtube" selected>الماب العادي (YouTube)</option>
   <option value="dailymotion">ماب Dailymotion</option>
+  <option value="archive">ماب Archive.org</option>
 </select>
 <small>اختيار الماب لا يغيّر التخزين؛ فقط يحدد ملف الربط الذي يضاف إليه الـ ID بعد نجاح الرفع.</small>
 <button id=submitBtn type=submit>رفع وربط الآن</button>
@@ -407,17 +420,32 @@ def _derive_video_id(value, filename):
     return m.group(1) if m else ''
 
 def _derive_publish_id(value, filename, map_target='youtube'):
-    if _map_target(map_target)!='dailymotion':
+    target=_map_target(map_target)
+    if target=='youtube':
         return _derive_video_id(value,filename)
-    raw=re.sub(r'[^A-Za-z0-9_-]','',str(value or '').strip())
-    if raw:return raw
+
+    raw=str(value or '').strip()
+    if target=='dailymotion':
+        raw=re.sub(r'[^A-Za-z0-9_-]','',raw)
+        if raw:return raw
+        name=Path(filename or '').stem
+        name=re.sub(r'^[=+]+','',name)
+        name=re.sub(r'^\d+-','',name)
+        m=re.match(r'^(x[A-Za-z0-9]{5,})(?=(?:\s*\(\d+\))?(?:_|$|\s|-))',name,re.I)
+        return m.group(1) if m else ''
+
+    # Archive.org: derive a stable, filesystem-safe key from the original episode filename.
+    # The app uses the exact same SHA-1 rule, so Arabic/spaces are handled without manual IDs.
+    if raw.startswith('ia_') and re.fullmatch(r'ia_[a-f0-9]{20}',raw,re.I):
+        return raw.lower()
+    import unicodedata
     name=Path(filename or '').stem
-    name=re.sub(r'^[=+]+','',name)
-    name=re.sub(r'^\d+-','',name)
-    # Dailymotion public video ids currently use an x-prefixed alphanumeric id
-    # (for example x9itz54). Accept it at the beginning of exported filenames.
-    m=re.match(r'^(x[A-Za-z0-9]{5,})(?=(?:\s*\(\d+\))?(?:_|$|\s|-))',name,re.I)
-    return m.group(1) if m else ''
+    name=re.sub(r'\s*\(\d+\)$','',name)
+    name=re.sub(r'(?i)_vocals_split_by_lalalai$','',name)
+    name=re.sub(r'(?i)_vocals$','',name)
+    name=unicodedata.normalize('NFC',name.strip())
+    if not name:return ''
+    return 'ia_'+hashlib.sha1(name.encode('utf-8')).hexdigest()[:20]
 
 def series_slug(value):
     value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
@@ -997,9 +1025,10 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <select name=map_target required>
   <option value="youtube" selected>YouTube — audio-map.json</option>
   <option value="dailymotion">Dailymotion — dailymotion-audio-map.json</option>
+  <option value="archive">Archive.org — archive-audio-map.json</option>
 </select>
 <label>الملفات</label><input type=file name=file multiple required accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,.mp4,.webm,.zip,audio/*,video/mp4,application/zip">
-<small>اسم الملف يجب أن يبدأ بمعرّف الفيديو: YouTube مثل yCYQZ5ICnIE.mp3، أو Dailymotion مثل x9itz54.mp3. يدعم ZIP أيضًا.</small>
+<small>YouTube وDailymotion: يبدأ الاسم بمعرّف الفيديو. Archive.org: ارفع الملف باسم الحلقة الأصلي، وسيتم توليد مفتاح الربط تلقائيًا من الاسم. يدعم ZIP أيضًا.</small>
 <button id=b type=submit>رفع وبدء إزالة الموسيقى</button>
 </form>
 <div id=uploadWrap style="display:none" class=job>
