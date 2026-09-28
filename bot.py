@@ -145,7 +145,7 @@ def update_selected_audio_map_url(vid, url, map_target='youtube'):
 def upload(file,vid):
     path,api,old=gh_info(vid)
     if old:
-        return 'skipped', update_selected_audio_map_url(vid,raw_url(path),map_target)
+        return 'skipped', update_audio_map(vid,path)
     data=base64.b64encode(Path(file).read_bytes()).decode()
     r=requests.put(api,headers=headers(),json={'message':f'Add cleaned audio {vid}','content':data,'branch':BRANCH},timeout=240)
     if r.status_code not in (200,201):
@@ -649,7 +649,7 @@ def upload_series(file,vid,series,map_target='youtube'):
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
     api,old=gh_get(path)
     if old:
-        return 'skipped', update_audio_map(vid,path)
+        return 'skipped', update_selected_audio_map_url(vid,raw_url(path),map_target)
 
     file_path=Path(file)
     if B2_KEY_ID and B2_APPLICATION_KEY:
