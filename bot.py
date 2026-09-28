@@ -308,7 +308,7 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
 <p>ارفع ملفات LALAL الجاهزة وسيتم استخراج Video ID تلقائيًا حتى لو كان الاسم مثل <b>6CBLA5W1N0I (1)_vocals_split_by_lalalai.aac</b>.</p>
 <form id=uploadForm method=post enctype=multipart/form-data>
 <input type=hidden name=k value="{{key}}">
-<label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="مثال: aJ3zGhhMuxE">
+<label>معرّف الفيديو</label><input name=id value="{{vid}}" placeholder="YouTube: aJ3zGhhMuxE أو Dailymotion: x9itz54">
 <small>اتركه فارغًا عند رفع عدة ملفات؛ سأقرأ الـ Video ID من بداية كل اسم ملف.</small>
 <label>مجلد المسلسل</label><input name=series value="{{series}}" placeholder="مثال: barbear" required>
 <small>أي ملف موجود مسبقًا داخل نفس مجلد المسلسل سيتم التعرف عليه وتخطيه بدون رفع أو تحويل من جديد.</small>
@@ -403,6 +403,19 @@ def _derive_video_id(value, filename):
     name=re.sub(r'^\d+-','',name)
 
     m=re.match(r'^([A-Za-z0-9_-]{11})(?=(?:\s*\(\d+\))?(?:_|$|\s))',name)
+    return m.group(1) if m else ''
+
+def _derive_publish_id(value, filename, map_target='youtube'):
+    if _map_target(map_target)!='dailymotion':
+        return _derive_video_id(value,filename)
+    raw=re.sub(r'[^A-Za-z0-9_-]','',str(value or '').strip())
+    if raw:return raw
+    name=Path(filename or '').stem
+    name=re.sub(r'^[=+]+','',name)
+    name=re.sub(r'^\d+-','',name)
+    # Dailymotion public video ids currently use an x-prefixed alphanumeric id
+    # (for example x9itz54). Accept it at the beginning of exported filenames.
+    m=re.match(r'^(x[A-Za-z0-9]{5,})(?=(?:\s*\(\d+\))?(?:_|$|\s|-))',name,re.I)
     return m.group(1) if m else ''
 
 def series_slug(value):
@@ -726,7 +739,7 @@ def publish_zip_file(incoming, series, map_target='youtube'):
                     continue
                 if '_no_vocals_' in original.lower():
                     continue
-                vid=_derive_video_id('',original)
+                vid=_derive_publish_id('',original,map_target)
                 if not vid:
                     errors.append(f'{info.filename}: تعذر معرفة Video ID من اسم الملف')
                     continue
@@ -887,7 +900,7 @@ def publish_clean():
                         errors.append(f'{incoming.filename}: {str(e)}')
                     continue
 
-                this_vid=_derive_video_id(vid if len(files)==1 else '',incoming.filename)
+                this_vid=_derive_publish_id(vid if len(files)==1 else '',incoming.filename,map_target)
                 if not this_vid:
                     errors.append(f'{incoming.filename}: تعذر معرفة Video ID من اسم الملف')
                     continue
