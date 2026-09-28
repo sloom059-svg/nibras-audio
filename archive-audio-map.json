@@ -2,5 +2,7 @@
   "version": 1,
   "provider": "archive",
   "description": "Independent Archive.org audio bindings. Existing YouTube and Dailymotion maps remain untouched.",
-  "audio": {}
+  "audio": {
+    "ia_b9b17d4bdacc86005620": "https://f005.backblazeb2.com/file/Nibras-audio/processed-audio/steven/ia_b9b17d4bdacc86005620.m4a"
+  }
 }
