@@ -1505,28 +1505,34 @@ def archive_item(identifier):
         return jsonify(ok=False,error='invalid_identifier'),400
     try:
         r=requests.get(f'https://archive.org/metadata/{quote(ident,safe="")}',timeout=30,headers={'User-Agent':'Nibras/1.0'})
+        if r.status_code==404:
+            return jsonify(ok=False,error='archive_item_not_found'),404
         if r.status_code!=200:
             return jsonify(ok=False,error=f'archive_http_{r.status_code}'),502
         root=r.json() or {}
+        if not root.get('metadata') or not isinstance(root.get('files'),list):
+            return jsonify(ok=False,error='archive_item_not_found'),404
         meta=root.get('metadata') or {}
         files=root.get('files') or []
-        originals=[]; fallback=[]
+        playable=[]
         for item in files:
             if not isinstance(item,dict): continue
             name=str(item.get('name') or '').strip()
             lower=name.lower()
-            if not lower.endswith(('.mp4','.m4v','.webm','.ogv','.mkv')): continue
-            if any(x in lower for x in ('_512kb','thumb','sample')): continue
+            if not lower.endswith(('.mp4','.m4v','.webm','.mkv')): continue
+            if item.get('private'): continue
             row={
                 'name':name,
                 'title':str(item.get('title') or '').strip(),
                 'length':item.get('length') or item.get('duration') or '',
                 'source':str(item.get('source') or '').strip(),
+                'original':str(item.get('original') or '').strip(),
                 'url':f'https://archive.org/download/{quote(ident,safe="")}/{quote(name,safe="/")}'
             }
-            fallback.append(row)
-            if row['source'].lower()=='original': originals.append(row)
-        chosen=originals or fallback
+            playable.append(row)
+        # Return the complete playable set. The client chooses one variant per episode;
+        # a global originals-only filter silently loses derivative-only episodes.
+        chosen=playable
         return jsonify(
             ok=True,
             identifier=ident,
