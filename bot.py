@@ -978,8 +978,8 @@ GPU_CLEAN_HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"
 <title>نبراس | إزالة الموسيقى بالـ GPU</title>
 <style>
 body{font-family:Arial;background:#15171b;color:#fff;max-width:760px;margin:30px auto;padding:18px}.c{background:#22262c;padding:24px;border-radius:18px}
-label{display:block;margin:14px 0 7px;font-weight:700}input,button{width:100%;padding:13px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:16px}
-input{background:#111;color:#fff}button{margin-top:18px;background:#7c5cff;color:#fff;font-weight:900;cursor:pointer}button:disabled{opacity:.55}
+label{display:block;margin:14px 0 7px;font-weight:700}input,select,button{width:100%;padding:13px;border-radius:10px;border:1px solid #444;box-sizing:border-box;font-size:16px}
+input,select{background:#111;color:#fff}button{margin-top:18px;background:#7c5cff;color:#fff;font-weight:900;cursor:pointer}button:disabled{opacity:.55}
 small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-top:16px}.err{background:#4b1d23;padding:12px;border-radius:10px;margin-top:16px}
 .job{background:#111;border:1px solid #3b4149;border-radius:12px;padding:12px;margin-top:10px}.bar{height:10px;background:#2b3037;border-radius:999px;overflow:hidden;margin-top:8px}
 .fill{height:100%;width:5%;background:#8f7cff;transition:width .2s}.muted{color:#aaa;font-size:13px}
@@ -990,11 +990,16 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
   <div id=storageText class=muted style="margin-top:7px">جاري حساب المساحة...</div>
   <div class=bar><div id=storageFill class=fill style="width:0%"></div></div>
 </div>
-<p>ارفع الصوت الخام، وسيتم فصل الموسيقى على RunPod ثم رفع الصوت النظيف وربطه تلقائيًا في <b>audio-map.json</b>.</p>
+<p>ارفع الصوت الخام، وسيتم فصل الموسيقى على RunPod ثم رفع الصوت النظيف وربطه تلقائيًا في الماب الذي تختاره.</p>
 <form id=f enctype=multipart/form-data>
 <label>مجلد المسلسل</label><input name=series placeholder="مثال: mshmsh" required>
+<label>نوع الفيديو / الماب</label>
+<select name=map_target required>
+  <option value="youtube" selected>YouTube — audio-map.json</option>
+  <option value="dailymotion">Dailymotion — dailymotion-audio-map.json</option>
+</select>
 <label>الملفات</label><input type=file name=file multiple required accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,.mp4,.webm,.zip,audio/*,video/mp4,application/zip">
-<small>اسم الملف يجب أن يبدأ بـ Video ID (11 حرفًا)، مثل: yCYQZ5ICnIE.mp3 أو yCYQZ5ICnIE episode.mp3. يدعم ZIP أيضًا.</small>
+<small>اسم الملف يجب أن يبدأ بمعرّف الفيديو: YouTube مثل yCYQZ5ICnIE.mp3، أو Dailymotion مثل x9itz54.mp3. يدعم ZIP أيضًا.</small>
 <button id=b type=submit>رفع وبدء إزالة الموسيقى</button>
 </form>
 <div id=uploadWrap style="display:none" class=job>
@@ -1056,6 +1061,7 @@ f.addEventListener('submit',async e=>{
  e.preventDefault();b.disabled=true;msg.innerHTML='<div class=ok>جاري رفع الملفات إلى نبراس...</div>';
  const files=[...f.querySelector('input[type=file]').files];
  const series=f.querySelector('input[name=series]').value.trim();
+ const mapTarget=f.querySelector('select[name=map_target]').value;
  const oneZip=files.length===1&&files[0].name.toLowerCase().endsWith('.zip');
 
  uploadWrap.style.display='block';uploadFill.style.width='0%';uploadPct.textContent='0%';uploadLabel.textContent='جاري رفع الملفات...';
@@ -1067,7 +1073,7 @@ f.addEventListener('submit',async e=>{
      let batchId=null;
      for(let i=0;i<total;i++){
        const fd=new FormData();
-       fd.append('upload_id',uploadId);fd.append('series',series);fd.append('filename',file.name);
+       fd.append('upload_id',uploadId);fd.append('series',series);fd.append('map_target',mapTarget);fd.append('filename',file.name);
        fd.append('index',String(i));fd.append('total',String(total));
        fd.append('chunk',file.slice(i*chunkSize,Math.min(file.size,(i+1)*chunkSize)),file.name+'.part');
        let j=null,lastError=null;
@@ -1184,7 +1190,7 @@ def runpod_process_job(job_id):
 
         if final.stat().st_size<10000:raise RuntimeError('ملف RunPod الناتج غير مكتمل')
         set_runpod_job(job_id,status='publishing',stage='github')
-        status,url=upload_series(final,job['id'],job['series'])
+        status,url=upload_series(final,job['id'],job['series'],job.get('map_target','youtube'))
         set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
         log(f'gpu-clean {job_id} {job["id"]}: done {url}')
     except Exception as e:
@@ -1219,21 +1225,22 @@ def ensure_runpod_worker():
         threading.Thread(target=_runpod_queue_worker,daemon=True,name='runpod-serial-worker').start()
         RUNPOD_WORKER_STARTED=True
 
-def _enqueue_gpu_source(original, source, series, base_url):
-    vid=_derive_video_id('',original)
+def _enqueue_gpu_source(original, source, series, base_url, map_target='youtube'):
+    map_target=_map_target(map_target)
+    vid=_derive_publish_id('',original,map_target)
     if not vid:
         try: source.unlink()
         except: pass
         return None
     try:
-        existing_path, existing_url = series_existing(vid, series)
+        existing_path, existing_url = series_existing(vid, series, map_target)
         if existing_url:
             try: source.unlink()
             except: pass
             skipped_id=uuid.uuid4().hex
             with RUNPOD_JOBS_LOCK:
                 RUNPOD_JOBS[skipped_id]={
-                    'job_id':skipped_id,'id':vid,'filename':original,'series':series,
+                    'job_id':skipped_id,'id':vid,'filename':original,'series':series,'map_target':map_target,
                     'status':'done','stage':'skipped','url':existing_url,'error':'',
                     'result':'exists','created_at':time.time(),'updated_at':time.time(),
                     'finished_at':time.time()
@@ -1245,7 +1252,7 @@ def _enqueue_gpu_source(original, source, series, base_url):
     token=uuid.uuid4().hex+uuid.uuid4().hex
     source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
     callback_url=f'{base_url}/gpu-result/{job_id}?t={token}'
-    row={'job_id':job_id,'id':vid,'filename':original,'series':series,'source':str(source),
+    row={'job_id':job_id,'id':vid,'filename':original,'series':series,'map_target':map_target,'source':str(source),
          'source_url':source_url,'callback_url':callback_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
          'created_at':time.time(),'updated_at':time.time()}
     with RUNPOD_JOBS_LOCK: RUNPOD_JOBS[job_id]=row
@@ -1253,7 +1260,7 @@ def _enqueue_gpu_source(original, source, series, base_url):
     RUNPOD_QUEUE.put(job_id)
     return job_id
 
-def _process_gpu_zip(zpath, series, base_url, batch_id):
+def _process_gpu_zip(zpath, series, base_url, batch_id, map_target='youtube'):
     jobs=[]
     try:
         with zipfile.ZipFile(zpath,'r') as z:
@@ -1265,7 +1272,7 @@ def _process_gpu_zip(zpath, series, base_url, batch_id):
                 dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{ext}'
                 with z.open(info,'r') as src, open(dst,'wb') as out:
                     shutil.copyfileobj(src,out)
-                jid=_enqueue_gpu_source(original,dst,series,base_url)
+                jid=_enqueue_gpu_source(original,dst,series,base_url,map_target)
                 if jid: jobs.append(jid)
         with RUNPOD_JOBS_LOCK:
             row=RUNPOD_JOBS.get(batch_id,{})
@@ -1287,6 +1294,7 @@ def gpu_clean():
     if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
         return jsonify(ok=False,error='أضف RUNPOD_API_KEY و RUNPOD_ENDPOINT_ID في Railway أولًا'),503
     series=(request.form.get('series') or '').strip()
+    map_target=_map_target(request.form.get('map_target'))
     if not series:return jsonify(ok=False,error='اكتب اسم مجلد المسلسل'),400
     uploaded=[x for x in request.files.getlist('file') if x and x.filename]
     if not uploaded:return jsonify(ok=False,error='اختر ملفًا واحدًا على الأقل'),400
@@ -1300,13 +1308,13 @@ def gpu_clean():
         incoming.save(zpath)
         with RUNPOD_JOBS_LOCK:
             RUNPOD_JOBS[batch_id]={
-                'job_id':batch_id,'filename':incoming.filename,'series':series,
+                'job_id':batch_id,'filename':incoming.filename,'series':series,'map_target':map_target,
                 'status':'queued','stage':'expanding_zip','jobs':[],'count':0,
                 'created_at':time.time(),'updated_at':time.time()
             }
         threading.Thread(
             target=_process_gpu_zip,
-            args=(zpath,series,base_url,batch_id),
+            args=(zpath,series,base_url,batch_id,map_target),
             daemon=True,
             name=f'gpu-zip-{batch_id[:8]}'
         ).start()
@@ -1319,7 +1327,7 @@ def gpu_clean():
             continue
         dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{suffix or ".source"}'
         incoming.save(dst)
-        jid=_enqueue_gpu_source(incoming.filename,dst,series,base_url)
+        jid=_enqueue_gpu_source(incoming.filename,dst,series,base_url,map_target)
         if jid: queued.append(jid)
 
     if not queued:
@@ -1327,7 +1335,7 @@ def gpu_clean():
     return jsonify(ok=True,status='queued',jobs=queued,count=len(queued)),202
 
 
-def _assemble_gpu_chunks(chunk_dir,zpath,total,series,filename,base_url,batch_id):
+def _assemble_gpu_chunks(chunk_dir,zpath,total,series,filename,base_url,batch_id,map_target='youtube'):
     chunk_dir=Path(chunk_dir); zpath=Path(zpath)
     try:
         missing=[i for i in range(total) if not (chunk_dir/f'{i:06d}.part').exists()]
@@ -1350,7 +1358,7 @@ def _assemble_gpu_chunks(chunk_dir,zpath,total,series,filename,base_url,batch_id
                 except:pass
         try:chunk_dir.rmdir()
         except:pass
-        _process_gpu_zip(zpath,series,base_url,batch_id)
+        _process_gpu_zip(zpath,series,base_url,batch_id,map_target)
     except Exception as e:
         with RUNPOD_JOBS_LOCK:
             row=RUNPOD_JOBS.get(batch_id,{})
@@ -1367,6 +1375,7 @@ def gpu_clean_chunk():
         return jsonify(ok=False,error='إعداد RunPod غير مكتمل'),503
     upload_id=(request.form.get('upload_id') or '').strip()
     series=(request.form.get('series') or '').strip()
+    map_target=_map_target(request.form.get('map_target'))
     filename=Path(request.form.get('filename') or 'upload.zip').name
     try:
         index=int(request.form.get('index','-1'))
@@ -1396,7 +1405,7 @@ def gpu_clean_chunk():
         if existing and existing.get('stage') in ('assembling','expanding_zip','expanded','done'):
             return jsonify(ok=True,status='queued',batch_id=batch_id,zip_background=True),202
         RUNPOD_JOBS[batch_id]={
-            'job_id':batch_id,'filename':filename,'series':series,
+            'job_id':batch_id,'filename':filename,'series':series,'map_target':map_target,
             'status':'queued','stage':'assembling','jobs':[],'count':0,
             'created_at':time.time(),'updated_at':time.time()
         }
@@ -1404,7 +1413,7 @@ def gpu_clean_chunk():
     base_url=public_base_url()
     threading.Thread(
         target=_assemble_gpu_chunks,
-        args=(chunk_dir,zpath,total,series,filename,base_url,batch_id),
+        args=(chunk_dir,zpath,total,series,filename,base_url,batch_id,map_target),
         daemon=True,name=f'gpu-assemble-{batch_id[:8]}'
     ).start()
     return jsonify(ok=True,status='queued',batch_id=batch_id,zip_background=True),202
