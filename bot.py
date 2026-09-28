@@ -1593,6 +1593,25 @@ def video_status(vid):
         return jsonify(ok=False,error=str(e)),500
     return jsonify(ok=True,id=vid,status='unknown')
 
+
+def _temporary_archive_probe():
+    try:
+        ident='fhd_20251010_202510'
+        r=requests.get('https://archive.org/metadata/'+quote(ident,safe=''),timeout=30,headers={'User-Agent':'Nibras/1.0'})
+        log(f'ARCHIVE_PROBE http={r.status_code}')
+        if r.status_code==200:
+            root=r.json() or {}
+            for item in root.get('files') or []:
+                if not isinstance(item,dict): continue
+                name=str(item.get('name') or '')
+                low=name.lower()
+                if low.endswith(('.mp4','.m4v','.webm','.mkv','.ogv')) and ('10' in name or 'الحلقة 10' in name):
+                    log('ARCHIVE_PROBE_FILE '+name)
+    except Exception as e:
+        log('ARCHIVE_PROBE_ERROR '+repr(e))
+
+threading.Thread(target=_temporary_archive_probe,daemon=True,name='archive-probe').start()
+
 if __name__=='__main__':
     ensure_worker()
     app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')))
