@@ -1549,6 +1549,37 @@ def _process_gpu_zip(zpath, series, base_url, batch_id, map_target='youtube'):
         try: zpath.unlink()
         except: pass
 
+def _process_gpu_files_background(saved_files, series, base_url, batch_id, map_target='youtube'):
+    jobs=[]
+    try:
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            row.update(status='processing',stage='staging',updated_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+        for original,path in saved_files:
+            try:
+                jid=_enqueue_gpu_source(original,Path(path),series,base_url,map_target)
+                if jid: jobs.append(jid)
+            except Exception as e:
+                log(f'gpu batch {batch_id} enqueue failed {original}: {e}')
+                try:Path(path).unlink()
+                except:pass
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            if jobs:
+                row.update(status='done',stage='expanded',jobs=jobs,count=len(jobs),updated_at=time.time(),finished_at=time.time())
+            else:
+                row.update(status='failed',stage='enqueue_failed',jobs=[],count=0,error='تعذر تجهيز الملفات للمعالجة',updated_at=time.time(),finished_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+    except Exception as e:
+        with RUNPOD_JOBS_LOCK:
+            row=RUNPOD_JOBS.get(batch_id,{})
+            row.update(status='failed',stage='enqueue_failed',error=str(e)[-1200:],updated_at=time.time(),finished_at=time.time())
+            RUNPOD_JOBS[batch_id]=row
+        for _,path in saved_files:
+            try:Path(path).unlink()
+            except:pass
+
 @app.route('/gpu-clean',methods=['GET','POST'])
 def gpu_clean():
     if request.method=='GET':
@@ -1582,19 +1613,34 @@ def gpu_clean():
         ).start()
         return jsonify(ok=True,status='queued',batch_id=batch_id,jobs=[],count=0,zip_background=True),202
 
-    queued=[]
+    saved=[]
     for incoming in uploaded:
         suffix=Path(incoming.filename or '').suffix.lower()
         if suffix not in RUNPOD_AUDIO_EXTS:
             continue
         dst=QDIR/f'gpu_src_{uuid.uuid4().hex}{suffix or ".source"}'
         incoming.save(dst)
-        jid=_enqueue_gpu_source(incoming.filename,dst,series,base_url,map_target)
-        if jid: queued.append(jid)
+        saved.append((incoming.filename,str(dst)))
 
-    if not queued:
-        return jsonify(ok=False,error='لم أجد ملفات باسم يبدأ بـ Video ID صحيح'),400
-    return jsonify(ok=True,status='queued',jobs=queued,count=len(queued)),202
+    if not saved:
+        return jsonify(ok=False,error='لم أجد ملفات صوت أو فيديو مدعومة'),400
+
+    # Return to the browser immediately after the client upload finishes.
+    # The second hop (Railway -> Backblaze) and RunPod enqueue now happen
+    # asynchronously so the page never waits on storage/network processing.
+    batch_id=uuid.uuid4().hex
+    with RUNPOD_JOBS_LOCK:
+        RUNPOD_JOBS[batch_id]={
+            'job_id':batch_id,'filename':'batch','series':series,'map_target':map_target,
+            'status':'queued','stage':'staging','jobs':[],'count':0,
+            'created_at':time.time(),'updated_at':time.time()
+        }
+    threading.Thread(
+        target=_process_gpu_files_background,
+        args=(saved,series,base_url,batch_id,map_target),
+        daemon=True,name=f'gpu-files-{batch_id[:8]}'
+    ).start()
+    return jsonify(ok=True,status='queued',batch_id=batch_id,jobs=[],count=len(saved),background_staging=True),202
 
 
 def _assemble_gpu_chunks(chunk_dir,zpath,total,series,filename,base_url,batch_id,map_target='youtube'):
