@@ -1,4 +1,4 @@
-import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile, tempfile, hashlib
+import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile, tempfile, hashlib, hmac
 from pathlib import Path
 from urllib.parse import quote
 import requests
@@ -13,6 +13,9 @@ BRANCH=os.getenv('GITHUB_BRANCH','main').strip()
 FOLDER=os.getenv('GITHUB_FOLDER','processed-audio').strip().strip('/')
 UPLOAD_KEY=os.getenv('UPLOAD_KEY','').strip()
 PUBLISH_KEY=os.getenv('PUBLISH_KEY','').strip()
+APK_PUBLISH_KEY=os.getenv('APK_PUBLISH_KEY','').strip()
+APK_PUBLIC_REPO=os.getenv('APK_PUBLIC_REPO','sloom059-svg/nibras-catalog').strip()
+APK_PUBLIC_BRANCH=os.getenv('APK_PUBLIC_BRANCH','main').strip()
 MAP_PATH=os.getenv('AUDIO_MAP_PATH','audio-map.json').strip().strip('/') or 'audio-map.json'
 DAILYMOTION_MAP_PATH=os.getenv('DAILYMOTION_AUDIO_MAP_PATH','dailymotion-audio-map.json').strip().strip('/') or 'dailymotion-audio-map.json'
 ARCHIVE_MAP_PATH=os.getenv('ARCHIVE_AUDIO_MAP_PATH','archive-audio-map.json').strip().strip('/') or 'archive-audio-map.json'
@@ -80,6 +83,68 @@ def gh_info(vid):
 
 def raw_url(path):
     return f'https://raw.githubusercontent.com/{REPO}/{BRANCH}/{quote(path, safe="/")}'
+
+def _github_repo_headers():
+    return {'Authorization':f'Bearer {TOKEN}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+
+def _public_repo_contents(path):
+    return f'https://api.github.com/repos/{APK_PUBLIC_REPO}/contents/{quote(path, safe="/")}'
+
+def _public_update_json(metadata):
+    path='website/nibras-update.json'
+    api=_public_repo_contents(path)
+    old=requests.get(api,headers=_github_repo_headers(),params={'ref':APK_PUBLIC_BRANCH},timeout=30)
+    sha=None
+    if old.status_code==200:
+        sha=(old.json() or {}).get('sha')
+    elif old.status_code!=404:
+        raise RuntimeError(f'Public metadata read {old.status_code}: {old.text[:700]}')
+    body={
+        'message':f"Publish Nibras {metadata.get('version_name','')} public update",
+        'content':base64.b64encode((json.dumps(metadata,ensure_ascii=False,indent=2)+'\n').encode('utf-8')).decode(),
+        'branch':APK_PUBLIC_BRANCH,
+    }
+    if sha: body['sha']=sha
+    put=requests.put(api,headers=_github_repo_headers(),json=body,timeout=60)
+    if put.status_code not in (200,201):
+        raise RuntimeError(f'Public metadata update {put.status_code}: {put.text[:900]}')
+
+def _public_release(code,version_name,apk_path,filename):
+    tag=f'nibras-app-{code}'
+    base=f'https://api.github.com/repos/{APK_PUBLIC_REPO}'
+    check=requests.get(f'{base}/releases/tags/{tag}',headers=_github_repo_headers(),timeout=30)
+    if check.status_code==404:
+        created=requests.post(f'{base}/releases',headers=_github_repo_headers(),json={
+            'tag_name':tag,'target_commitish':APK_PUBLIC_BRANCH,
+            'name':f'Nibras {version_name}',
+            'body':'Public APK distribution for Nibras. Source code remains private.',
+            'draft':False,'prerelease':False
+        },timeout=60)
+        if created.status_code not in (200,201):
+            raise RuntimeError(f'Public release create {created.status_code}: {created.text[:900]}')
+        release=created.json()
+    elif check.status_code==200:
+        release=check.json()
+    else:
+        raise RuntimeError(f'Public release check {check.status_code}: {check.text[:900]}')
+
+    for asset in release.get('assets') or []:
+        if str(asset.get('name') or '')==filename:
+            delete=requests.delete(f'{base}/releases/assets/{asset.get("id")}',headers=_github_repo_headers(),timeout=30)
+            if delete.status_code not in (204,404):
+                raise RuntimeError(f'Public asset delete {delete.status_code}: {delete.text[:700]}')
+
+    upload_url=f'https://uploads.github.com/repos/{APK_PUBLIC_REPO}/releases/{release["id"]}/assets'
+    with open(apk_path,'rb') as fh:
+        up=requests.post(upload_url,headers={
+            'Authorization':f'Bearer {TOKEN}',
+            'Accept':'application/vnd.github+json',
+            'X-GitHub-Api-Version':'2022-11-28',
+            'Content-Type':'application/vnd.android.package-archive'
+        },params={'name':filename},data=fh,timeout=600)
+    if up.status_code not in (200,201):
+        raise RuntimeError(f'Public APK upload {up.status_code}: {up.text[:900]}')
+    return f'https://github.com/{APK_PUBLIC_REPO}/releases/download/{tag}/{quote(filename)}'
 
 def update_audio_map_url(vid, url):
     api,old=gh_get(MAP_PATH)
@@ -1519,6 +1584,51 @@ def archive_debug(identifier):
         return jsonify(ok=True,identifier=ident,files=files)
     except Exception as e:
         return jsonify(ok=False,error=str(e)),502
+
+@app.post('/publish-apk')
+def publish_apk():
+    supplied=str(request.headers.get('X-Nibras-Publish-Key') or '').strip()
+    if not APK_PUBLISH_KEY or not hmac.compare_digest(supplied,APK_PUBLISH_KEY):
+        return jsonify(ok=False,error='unauthorized'),401
+    if not TOKEN:
+        return jsonify(ok=False,error='github_token_missing'),503
+    version_name=str(request.form.get('version_name') or '').strip()
+    version_code=str(request.form.get('version_code') or '').strip()
+    expected_sha=str(request.form.get('sha256') or '').strip().lower()
+    notes=str(request.form.get('notes') or 'إصدار نبراس الرسمي.').strip()[:1000]
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}',version_name):
+        return jsonify(ok=False,error='invalid_version_name'),400
+    if not re.fullmatch(r'[0-9]{1,12}',version_code):
+        return jsonify(ok=False,error='invalid_version_code'),400
+    upload=request.files.get('apk')
+    if upload is None:
+        return jsonify(ok=False,error='apk_required'),400
+    filename=f'Nibras-{version_name}.apk'
+    tmp=Path(tempfile.mkdtemp(prefix='nibras-apk-'))/filename
+    try:
+        upload.save(tmp)
+        actual=hashlib.sha256(tmp.read_bytes()).hexdigest()
+        if expected_sha and not hmac.compare_digest(actual,expected_sha):
+            return jsonify(ok=False,error='sha256_mismatch',actual_sha256=actual),400
+        public_url=_public_release(version_code,version_name,tmp,filename)
+        metadata={
+            'enabled':True,
+            'package':'com.nibras.kids',
+            'version_code':int(version_code),
+            'version_name':version_name,
+            'min_sdk':17,
+            'apk_url':public_url,
+            'sha256':actual,
+            'notes':notes
+        }
+        _public_update_json(metadata)
+        log(f'Published public APK {filename} -> {public_url}')
+        return jsonify(ok=True,apk_url=public_url,sha256=actual,metadata=metadata)
+    except Exception as e:
+        log(f'Public APK publish failed: {e}')
+        return jsonify(ok=False,error=str(e)),502
+    finally:
+        shutil.rmtree(tmp.parent,ignore_errors=True)
 
 @app.get('/audio-status')
 def audio_status():
