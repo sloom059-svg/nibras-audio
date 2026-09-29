@@ -1628,6 +1628,7 @@ def publish_apk():
     version_code=str(request.form.get('version_code') or '').strip()
     expected_sha=str(request.form.get('sha256') or '').strip().lower()
     notes=str(request.form.get('notes') or 'إصدار نبراس الرسمي.').strip()[:1000]
+    required=str(request.form.get('required') or '').strip().lower() in ('1','true','yes','on')
     if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}',version_name):
         return jsonify(ok=False,error='invalid_version_name'),400
     if not re.fullmatch(r'[0-9]{1,12}',version_code):
@@ -1645,6 +1646,7 @@ def publish_apk():
         public_url=_public_release(version_code,version_name,tmp,filename)
         metadata={
             'enabled':True,
+            'required':required,
             'package':'com.nibras.kids',
             'version_code':int(version_code),
             'version_name':version_name,
