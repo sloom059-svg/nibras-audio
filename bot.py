@@ -1605,7 +1605,11 @@ def _verify_github_release_oidc():
     if claims.get('ref')!='refs/heads/islamic-nibras':
         raise RuntimeError('wrong_ref')
     workflow_ref=str(claims.get('workflow_ref') or '')
-    if '/.github/workflows/nibras-release.yml@' not in workflow_ref:
+    allowed_workflows=(
+        '/.github/workflows/nibras-release.yml@',
+        '/.github/workflows/nibras-public-mirror.yml@'
+    )
+    if not any(x in workflow_ref for x in allowed_workflows):
         raise RuntimeError('wrong_workflow')
     if str(claims.get('event_name') or '') not in ('push','workflow_dispatch'):
         raise RuntimeError('wrong_event')
