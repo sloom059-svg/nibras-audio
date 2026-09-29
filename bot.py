@@ -1258,11 +1258,12 @@ function poll(id){
  fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(async r=>({status:r.status,body:await r.json()})).then(({status,body:j})=>{
    let box=document.getElementById('j_'+id); if(!box){box=document.createElement('div');box.className='job';box.id='j_'+id;jobs.appendChild(box);}
    if(!j.ok){
-     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>تعذر استرجاع المهمة المحفوظة. حدّث الصفحة وحاول مرة أخرى.</div>';return}
+     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=ok>الخدمة أعادت التشغيل — ملفك محفوظ، جاري استرجاع حالة المهمة...</div>';setTimeout(()=>poll(id),3000);return}
      box.innerHTML='<div class=err>'+esc(j.error||'تعذر قراءة حالة المهمة')+'</div>';return;
    }
    let p=8,label='بانتظار RunPod...';
-   if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
+   if(j.stage==='recovered'){p=55;label='تمت استعادة المهمة — جاري التحقق من النتيجة...'}
+   else if(j.status==='processing'){p=45;label='جاري فصل الموسيقى على GPU...'}
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
    if(j.status==='done'){p=100;const mapName=j.map_target==='archive'?'archive-audio-map.json':(j.map_target==='dailymotion'?'dailymotion-audio-map.json':'audio-map.json');label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث '+mapName+' ✅');loadStorageUsage()}
    if(j.status==='failed'){p=100;label='فشل ❌'}
@@ -1689,19 +1690,54 @@ def gpu_source(job_id):
 @app.get('/gpu-clean-status/<job_id>')
 def gpu_clean_status(job_id):
     recovered=False
-    with RUNPOD_JOBS_LOCK:row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    with RUNPOD_JOBS_LOCK:
+        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+
     if not row:
         row=load_persisted_runpod_job(job_id)
         if row:
             recovered=True
-            with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
+            with RUNPOD_JOBS_LOCK:
+                RUNPOD_JOBS[job_id]=row
             if row.get('status') in ('queued','processing','publishing'):
                 set_runpod_job(job_id,status='queued',stage='recovered',error='')
-                ensure_runpod_worker();RUNPOD_QUEUE.put(job_id)
-                with RUNPOD_JOBS_LOCK:row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
-    if not row:return jsonify(ok=False,error='job_not_found'),404
-    public=dict(row);public['recovered_after_restart']=recovered or public.get('stage')=='recovered'
-    for k in ('source','source_url','source_b2_name','callback_url','token','remote_job_id'):public.pop(k,None)
+                ensure_runpod_worker()
+                RUNPOD_QUEUE.put(job_id)
+                with RUNPOD_JOBS_LOCK:
+                    row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+
+    if not row:
+        return jsonify(ok=False,error='job_not_found',retryable=True),404
+
+    # Final storage/map wins over stale job state after a deploy or restart.
+    if row.get('status') not in ('done','failed'):
+        vid=row.get('id')
+        series=row.get('series')
+        map_target=row.get('map_target','youtube')
+        if vid and series:
+            try:
+                _,final_url=series_existing(vid,series,map_target)
+                if final_url:
+                    set_runpod_job(
+                        job_id,
+                        status='done',
+                        stage='done',
+                        result='published',
+                        url=final_url,
+                        error='',
+                        finished_at=time.time()
+                    )
+                    with RUNPOD_JOBS_LOCK:
+                        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+                    cleanup_gpu_source(row)
+                    log(f'gpu-clean {job_id} {vid}: reconciled done from final storage')
+            except Exception as e:
+                log(f'gpu status reconcile warning {job_id}: {e}')
+
+    public=dict(row)
+    public['recovered_after_restart']=recovered or public.get('stage')=='recovered'
+    for k in ('source','source_url','source_b2_name','callback_url','token','remote_job_id'):
+        public.pop(k,None)
     return jsonify(ok=True,**public)
 
 
