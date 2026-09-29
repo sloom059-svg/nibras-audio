@@ -746,6 +746,88 @@ def b2_upload(file_path, file_name):
         raise RuntimeError(f'Backblaze upload finished, but the file is not publicly playable (HTTP {check.status_code}); set the bucket to public')
     return 'uploaded',url
 
+GPU_TEMP_PREFIX='nibras-temp'
+GPU_JOB_PREFIX='nibras-job-state'
+
+def b2_upload_bytes(data, file_name, content_type='application/octet-stream'):
+    auth_data=b2_authorize()
+    if not auth_data: raise RuntimeError('Backblaze غير مربوط')
+    r=requests.post(f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_get_upload_url",
+        headers={'Authorization':auth_data['authorizationToken']},
+        json={'bucketId':auth_data['_bucket_id']},timeout=30)
+    if r.status_code!=200:
+        raise RuntimeError(f'Backblaze upload URL request failed HTTP {r.status_code}: {r.text[:400]}')
+    upload_info=r.json(); raw=bytes(data)
+    response=requests.post(upload_info['uploadUrl'],headers={
+        'Authorization':upload_info['authorizationToken'],
+        'X-Bz-File-Name':quote(file_name,safe='/'),
+        'Content-Type':content_type,
+        'X-Bz-Content-Sha1':hashlib.sha1(raw).hexdigest(),
+    },data=raw,timeout=(30,600))
+    if response.status_code not in (200,201):
+        raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+    return b2_file_url(file_name,auth_data)
+
+def b2_delete_file(file_name):
+    auth_data=b2_authorize()
+    if not auth_data:return False
+    caps=(auth_data.get('allowed') or {}).get('capabilities') or []
+    if 'deleteFiles' not in caps:
+        log(f'Backblaze key cannot delete temporary file: {file_name}')
+        return False
+    r=requests.post(f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_list_file_versions",
+        headers={'Authorization':auth_data['authorizationToken']},
+        json={'bucketId':auth_data['_bucket_id'],'startFileName':file_name,'maxFileCount':100},timeout=30)
+    if r.status_code!=200:
+        raise RuntimeError(f'Backblaze list versions failed HTTP {r.status_code}: {r.text[:300]}')
+    removed=False
+    for item in (r.json() or {}).get('files') or []:
+        if item.get('fileName')!=file_name:break
+        fid=item.get('fileId')
+        if not fid:continue
+        d=requests.post(f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_delete_file_version",
+            headers={'Authorization':auth_data['authorizationToken']},
+            json={'fileName':file_name,'fileId':fid},timeout=30)
+        if d.status_code!=200:
+            raise RuntimeError(f'Backblaze delete failed HTTP {d.status_code}: {d.text[:300]}')
+        removed=True
+    return removed
+
+def gpu_job_token(job_id):
+    secret=(UPLOAD_KEY or PUBLISH_KEY or TOKEN or 'nibras-gpu-fallback').encode('utf-8')
+    return hmac.new(secret,str(job_id).encode('utf-8'),hashlib.sha256).hexdigest()
+
+def gpu_job_state_name(job_id): return f'{GPU_JOB_PREFIX}/{job_id}.json'
+
+def persist_runpod_job(row):
+    if not row or not B2_KEY_ID or not B2_APPLICATION_KEY:return
+    safe=dict(row)
+    for k in ('token','source','result_path'):safe.pop(k,None)
+    try:
+        b2_upload_bytes(json.dumps(safe,ensure_ascii=False,separators=(',',':')).encode('utf-8'),
+            gpu_job_state_name(safe.get('job_id','')),'application/json')
+    except Exception as e:log(f'persist gpu job failed {safe.get("job_id","")}: {e}')
+
+def load_persisted_runpod_job(job_id):
+    if not B2_KEY_ID or not B2_APPLICATION_KEY:return {}
+    try:
+        auth_data=b2_authorize()
+        r=requests.get(b2_file_url(gpu_job_state_name(job_id),auth_data),timeout=30,headers={'Cache-Control':'no-cache'})
+        if r.status_code==404:return {}
+        if r.status_code!=200:raise RuntimeError(f'HTTP {r.status_code}')
+        row=r.json() or {}
+        if row.get('job_id')!=job_id:return {}
+        row['token']=gpu_job_token(job_id)
+        return row
+    except Exception as e:
+        log(f'load gpu job failed {job_id}: {e}'); return {}
+
+def cleanup_gpu_source(row):
+    name=(row or {}).get('source_b2_name') or ''
+    if not name:return
+    try:b2_delete_file(name)
+    except Exception as e:log(f'cleanup temporary source failed {name}: {e}')
+
 if B2_KEY_ID and B2_APPLICATION_KEY:
     try:
         auth_data=b2_authorize()
@@ -1124,7 +1206,7 @@ function pollBatch(id){
  const box=document.createElement('div');box.className='job';box.innerHTML='<b>ملف ZIP</b><div class=muted>جاري تجهيز الملفات...</div><div class=bar><div class=fill style="width:20%"></div></div>';jobs.prepend(box);
  const tick=()=>fetch('/gpu-clean-status/'+id).then(async r=>({status:r.status,body:await r.json()})).then(({status,body:j})=>{
    if(!j.ok){
-     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>انقطعت حالة المهمة بسبب إعادة تشغيل الخدمة. أعد رفع ZIP بعد تحديث الصفحة.</div>';return}
+     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>تعذر استرجاع مهمة ZIP المحفوظة. حدّث الصفحة وحاول مرة أخرى.</div>';return}
      setTimeout(tick,2000);return
    }
    if(j.status==='failed'){box.innerHTML='<div class=err>فشل فك ZIP: '+esc(j.error||'خطأ')+'</div>';return}
@@ -1141,7 +1223,7 @@ function poll(id){
  fetch('/gpu-clean-status/'+encodeURIComponent(id),{cache:'no-store'}).then(async r=>({status:r.status,body:await r.json()})).then(({status,body:j})=>{
    let box=document.getElementById('j_'+id); if(!box){box=document.createElement('div');box.className='job';box.id='j_'+id;jobs.appendChild(box);}
    if(!j.ok){
-     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>المهمة لم تعد موجودة بعد إعادة تشغيل الخدمة. حدّث الصفحة وأعد رفع الملف.</div>';return}
+     if(status===404&&j.error==='job_not_found'){box.innerHTML='<div class=err>تعذر استرجاع المهمة المحفوظة. حدّث الصفحة وحاول مرة أخرى.</div>';return}
      box.innerHTML='<div class=err>'+esc(j.error||'تعذر قراءة حالة المهمة')+'</div>';return;
    }
    let p=8,label='بانتظار RunPod...';
@@ -1216,6 +1298,8 @@ def set_runpod_job(job_id, **changes):
         row.update(changes)
         row['updated_at']=time.time()
         RUNPOD_JOBS[job_id]=row
+        snapshot=dict(row)
+    persist_runpod_job(snapshot)
 
 def runpod_headers():
     return {'Authorization':f'Bearer {RUNPOD_API_KEY}','Content-Type':'application/json'}
@@ -1228,81 +1312,55 @@ def public_base_url():
     return f'{proto}://{host}'
 
 def runpod_process_job(job_id):
-    with RUNPOD_JOBS_LOCK:
-        job=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    with RUNPOD_JOBS_LOCK: job=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not job:
+        job=load_persisted_runpod_job(job_id)
+        if job:
+            with RUNPOD_JOBS_LOCK: RUNPOD_JOBS[job_id]=job
     if not job:return
-    source=Path(job['source']); final=None
+    final=None
     try:
-        set_runpod_job(job_id,status='processing',stage='submit')
-        callback_url=job.get('callback_url','')
-        payload={'input':{
-            'source_url':job['source_url'],
-            'youtube_id':job['id'],
-            'upload_url':callback_url
-        }}
-        r=requests.post(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/run',headers=runpod_headers(),json=payload,timeout=60)
-        if r.status_code>=300:
-            raise RuntimeError(f'RunPod submit {r.status_code}: {r.text[:700]}')
-        remote_id=(r.json() or {}).get('id')
-        if not remote_id:raise RuntimeError('RunPod لم يرجع Job ID')
-        set_runpod_job(job_id,remote_job_id=remote_id,stage='gpu')
-        deadline=time.time()+7200
-        output=None
+        remote_id=job.get('remote_job_id')
+        if not remote_id:
+            set_runpod_job(job_id,status='processing',stage='submit')
+            payload={'input':{'source_url':job['source_url'],'youtube_id':job['id'],'upload_url':job['callback_url']}}
+            r=requests.post(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/run',headers=runpod_headers(),json=payload,timeout=60)
+            if r.status_code>=300:raise RuntimeError(f'RunPod submit {r.status_code}: {r.text[:700]}')
+            remote_id=(r.json() or {}).get('id')
+            if not remote_id:raise RuntimeError('RunPod لم يرجع Job ID')
+            set_runpod_job(job_id,remote_job_id=remote_id,status='processing',stage='gpu')
+        else:set_runpod_job(job_id,status='processing',stage='gpu')
+        deadline=time.time()+7200; output=None
         while time.time()<deadline:
-            s=requests.get(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/status/{remote_id}',headers=runpod_headers(),timeout=60)
-            if s.status_code>=500:
-                time.sleep(3); continue
-            if s.status_code>=300:
-                raise RuntimeError(f'RunPod status {s.status_code}: {s.text[:700]}')
-            data=s.json() or {}
-            status=data.get('status')
-            if status=='COMPLETED':
-                output=data.get('output') or {}
-                break
-            if status in ('FAILED','CANCELLED','TIMED_OUT'):
-                raise RuntimeError(f'RunPod انتهى بالحالة {status}: {str(data)[:900]}')
+            with RUNPOD_JOBS_LOCK: latest=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+            if latest.get('status')=='done':return
+            q=requests.get(f'{RUNPOD_BASE}/{RUNPOD_ENDPOINT_ID}/status/{remote_id}',headers=runpod_headers(),timeout=60)
+            if q.status_code>=500:time.sleep(3);continue
+            if q.status_code>=300:raise RuntimeError(f'RunPod status {q.status_code}: {q.text[:700]}')
+            data=q.json() or {}; status=data.get('status')
+            if status=='COMPLETED':output=data.get('output') or {};break
+            if status in ('FAILED','CANCELLED','TIMED_OUT'):raise RuntimeError(f'RunPod انتهى بالحالة {status}: {str(data)[:900]}')
             time.sleep(3)
         if output is None:raise RuntimeError('انتهت مهلة انتظار RunPod')
-
-        # Preferred path: worker uploads the M4A back to Railway, avoiding RunPod output-size limits.
         for _ in range(120):
-            with RUNPOD_JOBS_LOCK:
-                latest=dict(RUNPOD_JOBS.get(job_id,{}) or {})
-            received=latest.get('result_path')
-            if received and Path(received).exists():
-                final=Path(received)
-                break
+            with RUNPOD_JOBS_LOCK: latest=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+            if latest.get('status')=='done':return
             time.sleep(1)
-
-        # Backward compatibility for old worker images that still return base64.
-        if final is None:
-            if output.get('error'):raise RuntimeError(str(output.get('error')))
-            b64=output.get('audio_base64')
-            if b64:
-                final=O/f'gpu_{job_id}_{job["id"]}.m4a'
-                final.write_bytes(base64.b64decode(b64))
-            else:
-                raise RuntimeError('RunPod اكتمل لكن لم يسلّم ملف الصوت')
-
-        if final.stat().st_size<10000:raise RuntimeError('ملف RunPod الناتج غير مكتمل')
-        set_runpod_job(job_id,status='publishing',stage='github')
-        status,url=upload_series(final,job['id'],job['series'],job.get('map_target','youtube'))
-        set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
-        log(f'gpu-clean {job_id} {job["id"]}: done {url}')
+        if output.get('error'):raise RuntimeError(str(output.get('error')))
+        b64=output.get('audio_base64')
+        if b64:
+            final=O/f'gpu_{job_id}_{job["id"]}.m4a'; final.write_bytes(base64.b64decode(b64))
+            if final.stat().st_size<10000:raise RuntimeError('ملف RunPod الناتج غير مكتمل')
+            set_runpod_job(job_id,status='publishing',stage='storage')
+            status,url=upload_series(final,job['id'],job['series'],job.get('map_target','youtube'))
+            set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
+            cleanup_gpu_source(job); log(f'gpu-clean {job_id} {job["id"]}: done {url}'); return
+        raise RuntimeError('RunPod اكتمل لكن لم يسلّم ملف الصوت')
     except Exception as e:
-        err=str(e)[-2500:]
-        current_stage=RUNPOD_JOBS.get(job_id,{}).get('stage')
-        keep_result = bool(final and final.exists() and (current_stage=='github' or any(x in err for x in ('GitHub','Backblaze','B2'))))
-        if keep_result:
-            failure_stage='storage_failed' if current_stage=='github' or any(x in err for x in ('Backblaze','B2')) else 'github_failed'
-            set_runpod_job(job_id,status='failed',stage=failure_stage,error=err,result_path=str(final),finished_at=time.time())
-        else:
-            set_runpod_job(job_id,status='failed',stage='failed',error=err,finished_at=time.time())
+        err=str(e)[-2500:]; set_runpod_job(job_id,status='failed',stage='failed',error=err,finished_at=time.time())
         log(f'gpu-clean {job_id}: FAILED {str(e)[-1000:]}')
     finally:
-        try:source.unlink()
-        except:pass
-        if final and RUNPOD_JOBS.get(job_id,{}).get('stage') not in ('github_failed','storage_failed'):
+        if final:
             try:final.unlink()
             except:pass
 
@@ -1322,39 +1380,42 @@ def ensure_runpod_worker():
         RUNPOD_WORKER_STARTED=True
 
 def _enqueue_gpu_source(original, source, series, base_url, map_target='youtube'):
-    map_target=_map_target(map_target)
-    vid=_derive_publish_id('',original,map_target)
+    map_target=_map_target(map_target); vid=_derive_publish_id('',original,map_target); source=Path(source)
     if not vid:
-        try: source.unlink()
-        except: pass
+        try:source.unlink()
+        except:pass
         return None
     try:
-        existing_path, existing_url = series_existing(vid, series, map_target)
+        _,existing_url=series_existing(vid,series,map_target)
         if existing_url:
-            try: source.unlink()
-            except: pass
+            try:source.unlink()
+            except:pass
             skipped_id=uuid.uuid4().hex
-            with RUNPOD_JOBS_LOCK:
-                RUNPOD_JOBS[skipped_id]={
-                    'job_id':skipped_id,'id':vid,'filename':original,'series':series,'map_target':map_target,
-                    'status':'done','stage':'skipped','url':existing_url,'error':'',
-                    'result':'exists','created_at':time.time(),'updated_at':time.time(),
-                    'finished_at':time.time()
-                }
-            return skipped_id
-    except Exception as e:
-        log(f'gpu duplicate check failed {vid}: {e}')
-    job_id=uuid.uuid4().hex
-    token=uuid.uuid4().hex+uuid.uuid4().hex
-    source_url=f'{base_url}/gpu-source/{job_id}?t={token}'
-    callback_url=f'{base_url}/gpu-result/{job_id}?t={token}'
-    row={'job_id':job_id,'id':vid,'filename':original,'series':series,'map_target':map_target,'source':str(source),
-         'source_url':source_url,'callback_url':callback_url,'token':token,'status':'queued','stage':'waiting','url':'','error':'',
-         'created_at':time.time(),'updated_at':time.time()}
-    with RUNPOD_JOBS_LOCK: RUNPOD_JOBS[job_id]=row
-    ensure_runpod_worker()
-    RUNPOD_QUEUE.put(job_id)
-    return job_id
+            row={'job_id':skipped_id,'id':vid,'filename':original,'series':series,'map_target':map_target,
+                 'status':'done','stage':'skipped','url':existing_url,'error':'','result':'exists',
+                 'created_at':time.time(),'updated_at':time.time(),'finished_at':time.time()}
+            with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[skipped_id]=row
+            persist_runpod_job(row);return skipped_id
+    except Exception as e:log(f'gpu duplicate check failed {vid}: {e}')
+    if not B2_KEY_ID or not B2_APPLICATION_KEY:
+        try:source.unlink()
+        except:pass
+        raise RuntimeError('Backblaze مطلوب لحفظ ملفات GPU مؤقتًا بأمان')
+    job_id=uuid.uuid4().hex; ext=source.suffix.lower() or '.source'
+    temp_name=f'{GPU_TEMP_PREFIX}/{job_id}/{vid}{ext}'
+    try:_,source_url=b2_upload(source,temp_name)
+    except Exception:
+        try:source.unlink()
+        except:pass
+        raise
+    try:source.unlink()
+    except:pass
+    token=gpu_job_token(job_id); callback_url=f'{base_url}/gpu-result/{job_id}?t={token}'
+    row={'job_id':job_id,'id':vid,'filename':original,'series':series,'map_target':map_target,'source':'',
+         'source_b2_name':temp_name,'source_url':source_url,'callback_url':callback_url,'token':token,
+         'status':'queued','stage':'waiting','url':'','error':'','created_at':time.time(),'updated_at':time.time()}
+    with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
+    persist_runpod_job(row);ensure_runpod_worker();RUNPOD_QUEUE.put(job_id);return job_id
 
 def _process_gpu_zip(zpath, series, base_url, batch_id, map_target='youtube'):
     jobs=[]
@@ -1517,21 +1578,31 @@ def gpu_clean_chunk():
 @app.post('/gpu-result/<job_id>')
 def gpu_result(job_id):
     token=(request.args.get('t') or '').strip()
-    with RUNPOD_JOBS_LOCK:
-        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
-    if not row or not token or token!=row.get('token'):
+    with RUNPOD_JOBS_LOCK:row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not row:
+        row=load_persisted_runpod_job(job_id)
+        if row:
+            with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
+    if not row or not token or not hmac.compare_digest(token,gpu_job_token(job_id)):
         return jsonify(ok=False,error='not_found'),404
+    if row.get('status')=='done':return jsonify(ok=True,already_done=True,url=row.get('url','')),200
     f=request.files.get('file')
-    if not f:
-        return jsonify(ok=False,error='file_required'),400
+    if not f:return jsonify(ok=False,error='file_required'),400
     result_path=O/f'gpu_result_{job_id}_{row.get("id","audio")}.m4a'
-    f.save(result_path)
-    if result_path.stat().st_size<10000:
+    try:
+        f.save(result_path)
+        if result_path.stat().st_size<10000:return jsonify(ok=False,error='result_too_small'),400
+        set_runpod_job(job_id,status='publishing',stage='storage')
+        status,url=upload_series(result_path,row['id'],row['series'],row.get('map_target','youtube'))
+        set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
+        cleanup_gpu_source(row);log(f'gpu-clean {job_id} {row["id"]}: callback published {url}')
+        return jsonify(ok=True,size=result_path.stat().st_size,url=url),200
+    except Exception as e:
+        err=str(e)[-2500:];set_runpod_job(job_id,status='failed',stage='storage_failed',error=err,finished_at=time.time())
+        return jsonify(ok=False,error=err),500
+    finally:
         try:result_path.unlink()
         except:pass
-        return jsonify(ok=False,error='result_too_small'),400
-    set_runpod_job(job_id,result_path=str(result_path),stage='received')
-    return jsonify(ok=True,size=result_path.stat().st_size),200
 
 @app.get('/gpu-source/<job_id>')
 def gpu_source(job_id):
@@ -1546,11 +1617,21 @@ def gpu_source(job_id):
 
 @app.get('/gpu-clean-status/<job_id>')
 def gpu_clean_status(job_id):
-    with RUNPOD_JOBS_LOCK:
-        row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    recovered=False
+    with RUNPOD_JOBS_LOCK:row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
+    if not row:
+        row=load_persisted_runpod_job(job_id)
+        if row:
+            recovered=True
+            with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
+            if row.get('status') in ('queued','processing','publishing'):
+                set_runpod_job(job_id,status='queued',stage='recovered',error='')
+                ensure_runpod_worker();RUNPOD_QUEUE.put(job_id)
+                with RUNPOD_JOBS_LOCK:row=dict(RUNPOD_JOBS.get(job_id,{}) or {})
     if not row:return jsonify(ok=False,error='job_not_found'),404
-    for k in ('source','source_url','token','remote_job_id'):row.pop(k,None)
-    return jsonify(ok=True,**row)
+    public=dict(row);public['recovered_after_restart']=recovered or public.get('stage')=='recovered'
+    for k in ('source','source_url','source_b2_name','callback_url','token','remote_job_id'):public.pop(k,None)
+    return jsonify(ok=True,**public)
 
 
 @app.get('/compare-clean/<vid>')
