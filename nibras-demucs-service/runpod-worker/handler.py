@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 import requests
 import runpod
 
+CLEAN_PROFILE = "balanced-effects-v1"
+
 
 def run(cmd):
     subprocess.run(cmd, check=True)
@@ -84,10 +86,11 @@ def handler(event):
                 response = requests.post(
                     upload_url,
                     files={"file": (name, fh, "audio/mp4")},
+                    data={"clean_profile": CLEAN_PROFILE},
                     timeout=600,
                 )
             response.raise_for_status()
-            return {"filename": name, "size": size, "model": model, "uploaded": True}
+            return {"filename": name, "size": size, "model": model, "uploaded": True, "clean_profile": CLEAN_PROFILE}
 
         raw = final.read_bytes()
         return {
@@ -95,6 +98,7 @@ def handler(event):
             "audio_base64": base64.b64encode(raw).decode("ascii"),
             "size": len(raw),
             "model": model,
+            "clean_profile": CLEAN_PROFILE,
             "uploaded": False,
         }
 
