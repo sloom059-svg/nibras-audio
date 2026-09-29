@@ -1988,6 +1988,74 @@ def _probe_runpod_endpoint_config():
 
 threading.Thread(target=_probe_runpod_endpoint_config,daemon=True,name='runpod-config-probe').start()
 
+def _trigger_runpod_github_release():
+    # Runpod's GitHub integration rebuilds an endpoint when the connected repo
+    # publishes a GitHub Release. Keep this idempotent so Railway restarts do
+    # not create duplicate releases.
+    tag='runpod-balanced-effects-v1'
+    if not TOKEN or not REPO or not RUNPOD_ENDPOINT_ID:
+        return
+    try:
+        gh_headers=headers()
+        check=requests.get(
+            f'https://api.github.com/repos/{REPO}/releases/tags/{tag}',
+            headers=gh_headers,timeout=30
+        )
+        if check.status_code==200:
+            log(f'RUNPOD_RELEASE already_exists tag={tag}')
+        elif check.status_code==404:
+            payload={
+                'tag_name':tag,
+                'target_commitish':BRANCH,
+                'name':'RunPod balanced effects v1',
+                'body':'Deploy balanced-effects-v1 audio cleaning worker.',
+                'draft':False,
+                'prerelease':False
+            }
+            rr=requests.post(
+                f'https://api.github.com/repos/{REPO}/releases',
+                headers=gh_headers,json=payload,timeout=45
+            )
+            log(f'RUNPOD_RELEASE create_http={rr.status_code}')
+            if rr.status_code not in (200,201):
+                log('RUNPOD_RELEASE_ERROR '+(rr.text or '')[:700])
+                return
+        else:
+            log(f'RUNPOD_RELEASE check_http={check.status_code} '+(check.text or '')[:500])
+            return
+
+        # Watch the bound template until Runpod swaps away from the old image.
+        hdr={'Authorization':f'Bearer {RUNPOD_API_KEY}','Content-Type':'application/json'}
+        old_image='registry.runpod.net/sloom059-svg-nibras-audio-runpod-v2-dockerfile-runpod:09414af13'
+        for _ in range(90):
+            try:
+                er=requests.get(
+                    f'https://rest.runpod.io/v1/endpoints/{RUNPOD_ENDPOINT_ID}',
+                    headers=hdr,timeout=30
+                )
+                if er.status_code==200:
+                    eo=er.json() or {}
+                    tid=eo.get('templateId')
+                    if tid:
+                        tr=requests.get(
+                            f'https://rest.runpod.io/v1/templates/{tid}?includeEndpointBoundTemplates=true',
+                            headers=hdr,timeout=30
+                        )
+                        if tr.status_code==200:
+                            image_name=(tr.json() or {}).get('imageName') or ''
+                            if image_name and image_name!=old_image:
+                                log('RUNPOD_RELEASE_ACTIVE image='+image_name)
+                                return
+            except Exception as pe:
+                log('RUNPOD_RELEASE_POLL_WARNING '+repr(pe))
+            time.sleep(20)
+        log('RUNPOD_RELEASE_WAIT_TIMEOUT')
+    except Exception as e:
+        log('RUNPOD_RELEASE_EXCEPTION '+repr(e))
+
+threading.Thread(target=_trigger_runpod_github_release,daemon=True,name='runpod-release-trigger').start()
+
+
 
 if __name__=='__main__':
     ensure_worker()
