@@ -5,3 +5,4 @@ demucs==4.0.1
 gunicorn==23.0.0
 yt-dlp-ejs
 numpy<2
+PyJWT[crypto]>=2.9.0
