@@ -55,22 +55,45 @@ def handler(event):
 
         model = os.getenv("DEMUCS_MODEL", "htdemucs_ft")
         out_root = work / "demucs"
+        # Four-stem separation lets us keep dialogue at full level while restoring
+        # a controlled amount of ambience/effects. The old --two-stems=vocals path
+        # discarded nearly every non-vocal sound effect.
         run([
             sys.executable, "-m", "demucs",
-            "--two-stems=vocals",
             "-n", model,
             "-o", str(out_root),
             str(wav)
         ])
 
-        vocals = out_root / model / "input" / "vocals.wav"
-        if not vocals.exists():
-            raise RuntimeError("Demucs vocals output was not found")
+        stem_dir = out_root / model / "input"
+        vocals = stem_dir / "vocals.wav"
+        drums = stem_dir / "drums.wav"
+        bass = stem_dir / "bass.wav"
+        other = stem_dir / "other.wav"
+        required = [vocals, drums, bass, other]
+        if not all(p.exists() for p in required):
+            raise RuntimeError("Demucs four-stem output was not found")
 
-        filename = f"{youtube_id}.m4a" if youtube_id else "vocals.m4a"
+        # Balanced Nibras mix: speech stays untouched, while short effects and
+        # ambience remain audible. Musical accompaniment is strongly reduced.
+        other_gain = os.getenv("NIBRAS_OTHER_GAIN", "0.30")
+        drums_gain = os.getenv("NIBRAS_DRUMS_GAIN", "0.12")
+        bass_gain = os.getenv("NIBRAS_BASS_GAIN", "0.04")
+
+        filename = f"{youtube_id}.m4a" if youtube_id else "clean.m4a"
         final = work / filename
         run([
-            "ffmpeg", "-y", "-i", str(vocals),
+            "ffmpeg", "-y",
+            "-i", str(vocals),
+            "-i", str(other),
+            "-i", str(drums),
+            "-i", str(bass),
+            "-filter_complex",
+            f"[0:a]volume=1.0[v];[1:a]volume={other_gain}[o];"
+            f"[2:a]volume={drums_gain}[d];[3:a]volume={bass_gain}[b];"
+            "[v][o][d][b]amix=inputs=4:duration=longest:dropout_transition=0:normalize=0,"
+            "alimiter=limit=0.95[out]",
+            "-map", "[out]",
             "-c:a", "aac", "-b:a", "192k", str(final)
         ])
 
