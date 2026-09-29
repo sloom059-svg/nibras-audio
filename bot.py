@@ -1811,8 +1811,6 @@ def publish_apk():
         meta_path=tmp.parent/'nibras-update.json'
         meta_path.write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
         metadata_url=b2_upload_public_file(meta_path,'app-releases/nibras-update.json','application/json',overwrite=True)
-        # Keep the public catalog metadata in sync too. The website and app both read this file.
-        _public_update_json(metadata)
         log(f'Published public APK {filename} from {claims.get("run_id","github-actions")} -> {public_url}')
         return jsonify(ok=True,apk_url=public_url,metadata_url=metadata_url,sha256=actual,metadata=metadata)
     except Exception as e:
