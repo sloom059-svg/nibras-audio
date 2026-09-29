@@ -1,4 +1,4 @@
-import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile, tempfile, hashlib, hmac
+import os, re, base64, io, shutil, subprocess, threading, json, queue, uuid, time, html, zipfile, tempfile, hashlib, hmac
 from pathlib import Path
 from urllib.parse import quote
 import requests
@@ -708,13 +708,8 @@ def b2_existing_url(file_name):
         return ''
     raise RuntimeError(f'Backblaze public file check failed HTTP {r.status_code}; audio bucket must allow public reads')
 
-def b2_upload(file_path, file_name):
-    auth_data=b2_authorize()
-    if not auth_data:
-        return None
-    existing=b2_existing_url(file_name)
-    if existing:
-        return 'skipped',existing
+
+def _b2_get_upload_info(auth_data):
     r=requests.post(
         f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_get_upload_url",
         headers={'Authorization':auth_data['authorizationToken']},
@@ -722,24 +717,62 @@ def b2_upload(file_path, file_name):
     )
     if r.status_code!=200:
         raise RuntimeError(f'Backblaze upload URL request failed HTTP {r.status_code}: {r.text[:400]}')
-    upload_info=r.json()
+    return r.json()
+
+def _b2_should_retry_upload(exc=None, response=None):
+    if response is not None and response.status_code in (408,429,500,502,503,504):
+        return True
+    if exc is not None and isinstance(exc, requests.RequestException):
+        return True
+    return False
+
+def _b2_upload_stream_with_retry(auth_data, file_name, content_type, sha1_hex, open_stream, timeout=(30,600), attempts=4):
+    last=None
+    for attempt in range(attempts):
+        response=None
+        try:
+            upload_info=_b2_get_upload_info(auth_data)
+            with open_stream() as stream:
+                response=requests.post(
+                    upload_info['uploadUrl'],
+                    headers={
+                        'Authorization':upload_info['authorizationToken'],
+                        'X-Bz-File-Name':quote(file_name,safe='/'),
+                        'Content-Type':content_type,
+                        'X-Bz-Content-Sha1':sha1_hex,
+                    },
+                    data=stream,timeout=timeout
+                )
+            if response.status_code in (200,201):
+                return response
+            if not _b2_should_retry_upload(response=response):
+                raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+            last=RuntimeError(f'Backblaze transient upload HTTP {response.status_code}: {response.text[:300]}')
+        except Exception as e:
+            if not _b2_should_retry_upload(exc=e):
+                raise
+            last=e
+        if attempt < attempts-1:
+            delay=min(8,2**attempt)
+            log(f'Backblaze transient upload error for {file_name}; retry {attempt+2}/{attempts} in {delay}s: {last}')
+            time.sleep(delay)
+    raise RuntimeError(f'Backblaze upload failed after {attempts} attempts: {last}')
+
+def b2_upload(file_path, file_name):
+    auth_data=b2_authorize()
+    if not auth_data:
+        return None
+    existing=b2_existing_url(file_name)
+    if existing:
+        return 'skipped',existing
     sha1=hashlib.sha1()
     with Path(file_path).open('rb') as stream:
         for chunk in iter(lambda:stream.read(1024*1024),b''):
             sha1.update(chunk)
-        stream.seek(0)
-        response=requests.post(
-            upload_info['uploadUrl'],
-            headers={
-                'Authorization':upload_info['authorizationToken'],
-                'X-Bz-File-Name':quote(file_name,safe='/'),
-                'Content-Type':'audio/mp4',
-                'X-Bz-Content-Sha1':sha1.hexdigest(),
-            },
-            data=stream,timeout=(30,600)
-        )
-    if response.status_code not in (200,201):
-        raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+    _b2_upload_stream_with_retry(
+        auth_data,file_name,'audio/mp4',sha1.hexdigest(),
+        lambda:Path(file_path).open('rb'),timeout=(30,600)
+    )
     url=b2_file_url(file_name,auth_data)
     check=requests.head(url,allow_redirects=True,timeout=30)
     if check.status_code!=200:
@@ -752,26 +785,13 @@ def b2_upload_public_file(file_path, file_name, content_type='application/octet-
     if not overwrite:
         existing=b2_existing_url(file_name)
         if existing:return existing
-    r=requests.post(
-        f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_get_upload_url",
-        headers={'Authorization':auth_data['authorizationToken']},
-        json={'bucketId':auth_data['_bucket_id']},timeout=30
-    )
-    if r.status_code!=200:
-        raise RuntimeError(f'Backblaze upload URL request failed HTTP {r.status_code}: {r.text[:400]}')
-    upload_info=r.json()
     sha1=hashlib.sha1()
     with Path(file_path).open('rb') as stream:
         for chunk in iter(lambda:stream.read(1024*1024),b''):sha1.update(chunk)
-        stream.seek(0)
-        response=requests.post(upload_info['uploadUrl'],headers={
-            'Authorization':upload_info['authorizationToken'],
-            'X-Bz-File-Name':quote(file_name,safe='/'),
-            'Content-Type':content_type,
-            'X-Bz-Content-Sha1':sha1.hexdigest(),
-        },data=stream,timeout=(30,900))
-    if response.status_code not in (200,201):
-        raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+    _b2_upload_stream_with_retry(
+        auth_data,file_name,content_type,sha1.hexdigest(),
+        lambda:Path(file_path).open('rb'),timeout=(30,900)
+    )
     url=b2_file_url(file_name,auth_data)
     check=requests.head(url,allow_redirects=True,timeout=30)
     if check.status_code!=200:
@@ -784,20 +804,11 @@ GPU_JOB_PREFIX='nibras-job-state'
 def b2_upload_bytes(data, file_name, content_type='application/octet-stream'):
     auth_data=b2_authorize()
     if not auth_data: raise RuntimeError('Backblaze غير مربوط')
-    r=requests.post(f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_get_upload_url",
-        headers={'Authorization':auth_data['authorizationToken']},
-        json={'bucketId':auth_data['_bucket_id']},timeout=30)
-    if r.status_code!=200:
-        raise RuntimeError(f'Backblaze upload URL request failed HTTP {r.status_code}: {r.text[:400]}')
-    upload_info=r.json(); raw=bytes(data)
-    response=requests.post(upload_info['uploadUrl'],headers={
-        'Authorization':upload_info['authorizationToken'],
-        'X-Bz-File-Name':quote(file_name,safe='/'),
-        'Content-Type':content_type,
-        'X-Bz-Content-Sha1':hashlib.sha1(raw).hexdigest(),
-    },data=raw,timeout=(30,600))
-    if response.status_code not in (200,201):
-        raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+    raw=bytes(data)
+    _b2_upload_stream_with_retry(
+        auth_data,file_name,content_type,hashlib.sha1(raw).hexdigest(),
+        lambda:io.BytesIO(raw),timeout=(30,600)
+    )
     return b2_file_url(file_name,auth_data)
 
 def b2_delete_file(file_name):
