@@ -802,7 +802,7 @@ def gpu_job_state_name(job_id): return f'{GPU_JOB_PREFIX}/{job_id}.json'
 def persist_runpod_job(row):
     if not row or not B2_KEY_ID or not B2_APPLICATION_KEY:return
     safe=dict(row)
-    for k in ('token','source','result_path'):safe.pop(k,None)
+    for k in ('token','source','result_path','callback_url'):safe.pop(k,None)
     try:
         b2_upload_bytes(json.dumps(safe,ensure_ascii=False,separators=(',',':')).encode('utf-8'),
             gpu_job_state_name(safe.get('job_id','')),'application/json')
@@ -818,6 +818,9 @@ def load_persisted_runpod_job(job_id):
         row=r.json() or {}
         if row.get('job_id')!=job_id:return {}
         row['token']=gpu_job_token(job_id)
+        base=(row.get('base_url') or '').rstrip('/')
+        if base:
+            row['callback_url']=f"{base}/gpu-result/{job_id}?t={row['token']}"
         return row
     except Exception as e:
         log(f'load gpu job failed {job_id}: {e}'); return {}
@@ -1364,6 +1367,39 @@ def runpod_process_job(job_id):
             try:final.unlink()
             except:pass
 
+def recover_pending_runpod_jobs():
+    if not B2_KEY_ID or not B2_APPLICATION_KEY:return
+    try:
+        auth_data=b2_authorize()
+        start=None; names=[]
+        while True:
+            payload={'bucketId':auth_data['_bucket_id'],'prefix':GPU_JOB_PREFIX+'/','maxFileCount':1000}
+            if start:payload['startFileName']=start
+            r=requests.post(f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_list_file_names",
+                headers={'Authorization':auth_data['authorizationToken']},json=payload,timeout=30)
+            if r.status_code!=200:raise RuntimeError(f'HTTP {r.status_code}: {r.text[:300]}')
+            data=r.json() or {}
+            names.extend([x.get('fileName','') for x in data.get('files') or []])
+            start=data.get('nextFileName')
+            if not start:break
+        ensure_runpod_worker()
+        recovered=0
+        for name in names:
+            m=re.fullmatch(re.escape(GPU_JOB_PREFIX)+r'/([a-f0-9]{32})\.json',name or '')
+            if not m:continue
+            jid=m.group(1)
+            row=load_persisted_runpod_job(jid)
+            if not row or row.get('status') not in ('queued','processing','publishing'):continue
+            with RUNPOD_JOBS_LOCK:
+                if jid in RUNPOD_JOBS:continue
+                RUNPOD_JOBS[jid]=row
+            set_runpod_job(jid,status='queued',stage='recovered',error='')
+            RUNPOD_QUEUE.put(jid);recovered+=1
+        if recovered:log(f'recovered {recovered} GPU jobs after restart')
+    except Exception as e:
+        log(f'GPU recovery scan failed: {e}')
+
+
 def _runpod_queue_worker():
     while True:
         job_id=RUNPOD_QUEUE.get()
@@ -1412,7 +1448,7 @@ def _enqueue_gpu_source(original, source, series, base_url, map_target='youtube'
     except:pass
     token=gpu_job_token(job_id); callback_url=f'{base_url}/gpu-result/{job_id}?t={token}'
     row={'job_id':job_id,'id':vid,'filename':original,'series':series,'map_target':map_target,'source':'',
-         'source_b2_name':temp_name,'source_url':source_url,'callback_url':callback_url,'token':token,
+         'source_b2_name':temp_name,'source_url':source_url,'base_url':base_url,'callback_url':callback_url,'token':token,
          'status':'queued','stage':'waiting','url':'','error':'','created_at':time.time(),'updated_at':time.time()}
     with RUNPOD_JOBS_LOCK:RUNPOD_JOBS[job_id]=row
     persist_runpod_job(row);ensure_runpod_worker();RUNPOD_QUEUE.put(job_id);return job_id
@@ -1779,6 +1815,9 @@ def home():return render_template_string(HTML)
 @app.get('/health')
 def health():
     ensure_worker()
+    if not getattr(app,'_gpu_recovery_started',False):
+        app._gpu_recovery_started=True
+        threading.Thread(target=recover_pending_runpod_jobs,daemon=True,name='gpu-recovery').start()
     with JOBS_LOCK:
         active=sum(1 for x in JOBS.values() if x.get('status') in ('queued','processing'))
     return {'ok':True,'service':'nibras-audio','queue':True,'active_jobs':active,'waiting':JOB_QUEUE.qsize(),'folder':FOLDER,'map':MAP_PATH}
@@ -1790,6 +1829,9 @@ def process_upload():
 @app.post('/enqueue-upload')
 def enqueue_upload():
     return enqueue_request()
+
+if B2_KEY_ID and B2_APPLICATION_KEY:
+    threading.Thread(target=recover_pending_runpod_jobs,daemon=True,name='gpu-recovery-boot').start()
 
 @app.get('/job-status/<job_id>')
 def job_status(job_id):
