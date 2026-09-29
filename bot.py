@@ -768,7 +768,6 @@ def b2_upload_public_file(file_path, file_name, content_type='application/octet-
             'Authorization':upload_info['authorizationToken'],
             'X-Bz-File-Name':quote(file_name,safe='/'),
             'Content-Type':content_type,
-            'Content-Disposition':f'attachment; filename="{Path(file_name).name}"',
             'X-Bz-Content-Sha1':sha1.hexdigest(),
         },data=stream,timeout=(30,900))
     if response.status_code not in (200,201):
