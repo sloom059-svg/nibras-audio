@@ -825,6 +825,41 @@ def b2_delete_file(file_name):
         removed=True
     return removed
 
+
+def _cleanup_legacy_tom_jerry_tests_once():
+    marker='nibras-maintenance/delete-tom-jerry-legacy-v1.done'
+    try:
+        auth_data=b2_authorize()
+        if not auth_data:return
+        mr=requests.get(b2_file_url(marker,auth_data),timeout=20,headers={'Cache-Control':'no-cache'})
+        if mr.status_code==200:
+            return
+        targets=[
+            'processed-audio/tom_jerry/ia_3477255f8d3a9c21887a.m4a',
+            'processed-audio/tom_jerry/ia_94f4a9f249a17545c5f1.m4a',
+        ]
+        results={}
+        for name in targets:
+            try:
+                results[name]=bool(b2_delete_file(name))
+            except Exception as e:
+                results[name]='error:'+repr(e)
+        # Only mark complete when both are actually gone. This avoids deleting
+        # newly re-uploaded replacements on a later restart.
+        all_gone=True
+        for name in targets:
+            rr=requests.get(b2_file_url(name,auth_data),timeout=20,headers={'Cache-Control':'no-cache'})
+            if rr.status_code!=404:
+                all_gone=False
+        log('TOM_JERRY_TEST_CLEANUP '+json.dumps(results,ensure_ascii=False))
+        if all_gone:
+            b2_upload_bytes(b'done',marker,'text/plain')
+            log('TOM_JERRY_TEST_CLEANUP complete')
+        else:
+            log('TOM_JERRY_TEST_CLEANUP incomplete')
+    except Exception as e:
+        log('TOM_JERRY_TEST_CLEANUP exception '+repr(e))
+
 def gpu_job_token(job_id):
     secret=(UPLOAD_KEY or PUBLISH_KEY or TOKEN or 'nibras-gpu-fallback').encode('utf-8')
     return hmac.new(secret,str(job_id).encode('utf-8'),hashlib.sha256).hexdigest()
@@ -1987,6 +2022,7 @@ def _probe_runpod_endpoint_config():
         log('RUNPOD_CONFIG_EXCEPTION '+repr(e))
 
 threading.Thread(target=_probe_runpod_endpoint_config,daemon=True,name='runpod-config-probe').start()
+threading.Thread(target=_cleanup_legacy_tom_jerry_tests_once,daemon=True,name='tom-jerry-test-cleanup').start()
 
 def _trigger_runpod_github_release():
     # Runpod's GitHub integration rebuilds an endpoint when the connected repo
