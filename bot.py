@@ -1967,6 +1967,21 @@ def _probe_runpod_endpoint_config():
         tpl=obj.get('template')
         if isinstance(tpl,dict):
             safe['template']={k:tpl.get(k) for k in ('id','name','imageName','containerDiskInGb','dockerStartCmd','dockerEntrypoint') if k in tpl}
+        template_id=obj.get('templateId')
+        if template_id:
+            tr=requests.get(
+                f'https://rest.runpod.io/v1/templates/{template_id}?includeEndpointBoundTemplates=true',
+                headers=hdr,timeout=30
+            )
+            safe['template_http']=tr.status_code
+            if tr.status_code==200:
+                tobj=tr.json() or {}
+                safe['template_detail']={k:tobj.get(k) for k in (
+                    'id','name','imageName','containerDiskInGb','dockerStartCmd','dockerEntrypoint',
+                    'isServerless','volumeInGb','volumeMountPath'
+                ) if k in tobj}
+            else:
+                safe['template_error']=(tr.text or '')[:300]
         log('RUNPOD_CONFIG_SAFE '+json.dumps(safe,ensure_ascii=False))
     except Exception as e:
         log('RUNPOD_CONFIG_EXCEPTION '+repr(e))
