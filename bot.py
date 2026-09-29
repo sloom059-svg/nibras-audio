@@ -1302,7 +1302,7 @@ function poll(id){
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
    if(j.status==='done'){p=100;const mapName=j.map_target==='archive'?'archive-audio-map.json':(j.map_target==='dailymotion'?'dailymotion-audio-map.json':'audio-map.json');label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث '+mapName+' ✅');loadStorageUsage()}
    if(j.status==='failed'){p=100;label='فشل ❌'}
-   const profile=j.clean_profile?('<div class="muted" style="margin-top:5px">طريقة التنقية: '+esc(j.clean_profile)+(j.clean_profile==='balanced-effects-v1'?' ✅':' ⚠️')+'</div>'):'';
+   const profile=j.clean_profile?('<div class="muted" style="margin-top:5px">طريقة التنقية: '+esc(j.clean_profile)+(j.clean_profile==='vocals-only-min-music-v1'?' ✅':' ⚠️')+'</div>'):'';
    box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div>'+profile+'<div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
    if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
  }).catch(()=>setTimeout(()=>poll(id),3000));
@@ -2053,7 +2053,7 @@ def _trigger_runpod_github_release():
     # Runpod's GitHub integration rebuilds an endpoint when the connected repo
     # publishes a GitHub Release. Keep this idempotent so Railway restarts do
     # not create duplicate releases.
-    tag='runpod-balanced-effects-v1'
+    tag='runpod-vocals-only-min-music-v1'
     if not TOKEN or not REPO or not RUNPOD_ENDPOINT_ID:
         return
     try:
@@ -2068,8 +2068,8 @@ def _trigger_runpod_github_release():
             payload={
                 'tag_name':tag,
                 'target_commitish':BRANCH,
-                'name':'RunPod balanced effects v1',
-                'body':'Deploy balanced-effects-v1 audio cleaning worker.',
+                'name':'RunPod vocals only min music v1',
+                'body':'Deploy vocals-only-min-music-v1 audio cleaning worker.',
                 'draft':False,
                 'prerelease':False
             }
