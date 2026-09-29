@@ -827,7 +827,7 @@ def b2_delete_file(file_name):
 
 
 def _cleanup_legacy_tom_jerry_tests_once():
-    marker='nibras-maintenance/delete-tom-jerry-legacy-v1.done'
+    marker='nibras-maintenance/delete-tom-jerry-episode1-reupload-v2.done'
     try:
         auth_data=b2_authorize()
         if not auth_data:return
@@ -836,7 +836,6 @@ def _cleanup_legacy_tom_jerry_tests_once():
             return
         targets=[
             'processed-audio/tom_jerry/ia_3477255f8d3a9c21887a.m4a',
-            'processed-audio/tom_jerry/ia_94f4a9f249a17545c5f1.m4a',
         ]
         results={}
         for name in targets:
