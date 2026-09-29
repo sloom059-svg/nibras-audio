@@ -746,6 +746,39 @@ def b2_upload(file_path, file_name):
         raise RuntimeError(f'Backblaze upload finished, but the file is not publicly playable (HTTP {check.status_code}); set the bucket to public')
     return 'uploaded',url
 
+def b2_upload_public_file(file_path, file_name, content_type='application/octet-stream', overwrite=False):
+    auth_data=b2_authorize()
+    if not auth_data: raise RuntimeError('Backblaze غير مربوط')
+    if not overwrite:
+        existing=b2_existing_url(file_name)
+        if existing:return existing
+    r=requests.post(
+        f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_get_upload_url",
+        headers={'Authorization':auth_data['authorizationToken']},
+        json={'bucketId':auth_data['_bucket_id']},timeout=30
+    )
+    if r.status_code!=200:
+        raise RuntimeError(f'Backblaze upload URL request failed HTTP {r.status_code}: {r.text[:400]}')
+    upload_info=r.json()
+    sha1=hashlib.sha1()
+    with Path(file_path).open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):sha1.update(chunk)
+        stream.seek(0)
+        response=requests.post(upload_info['uploadUrl'],headers={
+            'Authorization':upload_info['authorizationToken'],
+            'X-Bz-File-Name':quote(file_name,safe='/'),
+            'Content-Type':content_type,
+            'Content-Disposition':f'attachment; filename="{Path(file_name).name}"',
+            'X-Bz-Content-Sha1':sha1.hexdigest(),
+        },data=stream,timeout=(30,900))
+    if response.status_code not in (200,201):
+        raise RuntimeError(f'Backblaze upload failed HTTP {response.status_code}: {response.text[:500]}')
+    url=b2_file_url(file_name,auth_data)
+    check=requests.head(url,allow_redirects=True,timeout=30)
+    if check.status_code!=200:
+        raise RuntimeError(f'Backblaze public file check failed HTTP {check.status_code}')
+    return url
+
 GPU_TEMP_PREFIX='nibras-temp'
 GPU_JOB_PREFIX='nibras-job-state'
 
@@ -1760,7 +1793,8 @@ def publish_apk():
         actual=hashlib.sha256(tmp.read_bytes()).hexdigest()
         if expected_sha and not hmac.compare_digest(actual,expected_sha):
             return jsonify(ok=False,error='sha256_mismatch',actual_sha256=actual),400
-        public_url=_public_release(version_code,version_name,tmp,filename)
+        public_path=f'app-releases/{filename}'
+        public_url=b2_upload_public_file(tmp,public_path,'application/vnd.android.package-archive',overwrite=True)
         metadata={
             'enabled':True,
             'required':required,
@@ -1772,9 +1806,11 @@ def publish_apk():
             'sha256':actual,
             'notes':notes
         }
-        _public_update_json(metadata)
+        meta_path=tmp.parent/'nibras-update.json'
+        meta_path.write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+        metadata_url=b2_upload_public_file(meta_path,'app-releases/nibras-update.json','application/json',overwrite=True)
         log(f'Published public APK {filename} from {claims.get("run_id","github-actions")} -> {public_url}')
-        return jsonify(ok=True,apk_url=public_url,sha256=actual,metadata=metadata)
+        return jsonify(ok=True,apk_url=public_url,metadata_url=metadata_url,sha256=actual,metadata=metadata)
     except Exception as e:
         log(f'Public APK publish failed: {e}')
         return jsonify(ok=False,error=str(e)),502
