@@ -1972,17 +1972,27 @@ def video_status(vid):
 
 def _temporary_archive_probe():
     try:
-        ident='fhd_20251010_202510'
+        ident='01_20260301_20260301_1946'
         r=requests.get('https://archive.org/metadata/'+quote(ident,safe=''),timeout=30,headers={'User-Agent':'Nibras/1.0'})
         log(f'ARCHIVE_PROBE http={r.status_code}')
         if r.status_code==200:
             root=r.json() or {}
+            videos=[]
+            import unicodedata
             for item in root.get('files') or []:
                 if not isinstance(item,dict): continue
                 name=str(item.get('name') or '')
                 low=name.lower()
-                if low.endswith(('.mp4','.m4v','.webm','.mkv','.ogv')) and ('10' in name or 'الحلقة 10' in name):
-                    log('ARCHIVE_PROBE_FILE '+name)
+                if not low.endswith(('.mp4','.m4v','.webm','.mkv','.ogv')): continue
+                stem=Path(name).stem
+                stem=re.sub(r'\s*\(\d+\)$','',stem)
+                stem=re.sub(r'(?i)_vocals_split_by_lalalai$','',stem)
+                stem=re.sub(r'(?i)_vocals$','',stem)
+                stem=unicodedata.normalize('NFC',stem.strip())
+                key='ia_'+hashlib.sha1(stem.encode('utf-8')).hexdigest()[:20]
+                videos.append((name,key))
+            for name,key in videos[:40]:
+                log('ARCHIVE_PROBE_FILE '+key+' | '+name)
     except Exception as e:
         log('ARCHIVE_PROBE_ERROR '+repr(e))
 
