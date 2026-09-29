@@ -1881,6 +1881,30 @@ def compare_clean(vid):
     except Exception as e:
         return str(e),500
 
+@app.get('/archive-item/<identifier>')
+def archive_item(identifier):
+    ident=str(identifier or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,200}',ident):
+        return jsonify(ok=False,error='invalid_identifier'),400
+    try:
+        r=requests.get(
+            'https://archive.org/metadata/'+quote(ident,safe=''),
+            timeout=30,
+            headers={'User-Agent':'Nibras/1.0','Accept':'application/json'}
+        )
+        if r.status_code==404:
+            return jsonify(ok=False,error='archive_not_found'),404
+        if r.status_code!=200:
+            return jsonify(ok=False,error='archive_http_'+str(r.status_code)),502
+        root=r.json() or {}
+        if not isinstance(root,dict) or not isinstance(root.get('files'),list):
+            return jsonify(ok=False,error='archive_invalid_metadata'),502
+        return jsonify(root)
+    except requests.Timeout:
+        return jsonify(ok=False,error='archive_timeout'),504
+    except Exception as e:
+        return jsonify(ok=False,error=str(e)),502
+
 @app.get('/archive-debug/<identifier>')
 def archive_debug(identifier):
     ident=str(identifier or '').strip()
