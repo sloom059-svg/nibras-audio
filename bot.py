@@ -508,7 +508,13 @@ def _derive_publish_id(value, filename, map_target='youtube', series=''):
         return raw.lower()
     import unicodedata
     name=Path(filename or '').stem
-    name=re.sub(r'\s*\(\d+\)
+    name=re.sub(r'\s*\(\d+\)$','',name)
+    name=re.sub(r'(?i)_vocals_split_by_lalalai$','',name)
+    name=re.sub(r'(?i)_vocals$','',name)
+    name=unicodedata.normalize('NFC',name.strip())
+    if not name:return ''
+    folder=series_slug(series)
+    return 'iaf_'+hashlib.sha1((folder+'/'+name).encode('utf-8')).hexdigest()[:20]
 
 def series_slug(value):
     value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
