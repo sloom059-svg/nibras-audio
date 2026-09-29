@@ -524,7 +524,14 @@ def series_existing(vid, series, map_target='youtube'):
     if B2_KEY_ID and B2_APPLICATION_KEY:
         b2url=b2_existing_url(path)
         if b2url:
-            return path, update_selected_audio_map_url(vid,b2url,map_target)
+            try:
+                update_selected_audio_map_url(vid,b2url,map_target)
+            except Exception as e:
+                log(f'map update deferred for existing {vid}: {e}')
+            return path, b2url
+        # Backblaze is the active storage backend. Do not burn a GitHub API
+        # request checking for a legacy copy when the B2 object is absent.
+        return path, ''
     api,old=gh_get(path)
     if old:
         return path, update_selected_audio_map_url(vid,raw_url(path),map_target)
@@ -915,19 +922,47 @@ if B2_KEY_ID and B2_APPLICATION_KEY:
     except Exception as e:
         log(f'Backblaze storage authorization failed: {e}')
 
+def _retry_deferred_map_update(vid, url, map_target):
+    # Large batches can briefly exhaust GitHub's REST limit. Retry the small
+    # map write in the background without re-running Demucs or re-uploading audio.
+    for delay in (60, 180, 600, 1200, 1800):
+        time.sleep(delay)
+        try:
+            update_selected_audio_map_url(vid,url,map_target)
+            log(f'deferred map update complete for {vid}')
+            return
+        except Exception as e:
+            log(f'deferred map update retry for {vid}: {e}')
+    log(f'deferred map update still pending for {vid}')
+
 def upload_series(file,vid,series,map_target='youtube'):
     folder=series_slug(series)
     path=f'{FOLDER}/{folder}/{vid}.m4a' if FOLDER else f'{folder}/{vid}.m4a'
-    api,old=gh_get(path)
-    if old:
-        return 'skipped', update_selected_audio_map_url(vid,raw_url(path),map_target)
-
     file_path=Path(file)
+
+    # Backblaze is the primary audio store. Avoid a GitHub contents check for
+    # every file; it wastes the REST rate limit during large batches.
     if B2_KEY_ID and B2_APPLICATION_KEY:
         result=b2_upload(file_path,path)
         if result:
             status,url=result
-            return status, update_selected_audio_map_url(vid,url,map_target)
+            try:
+                update_selected_audio_map_url(vid,url,map_target)
+            except Exception as e:
+                # Storage already succeeded. A temporary GitHub rate limit must
+                # not turn a successful clean into a failed job.
+                log(f'map update deferred for {vid}: {e}')
+                threading.Thread(
+                    target=_retry_deferred_map_update,
+                    args=(vid,url,map_target),
+                    daemon=True,
+                    name=f'map-retry-{str(vid)[:12]}'
+                ).start()
+            return status,url
+
+    api,old=gh_get(path)
+    if old:
+        return 'skipped', update_selected_audio_map_url(vid,raw_url(path),map_target)
     message=f'Add cleaned audio {folder}/{vid}'
     size=file_path.stat().st_size
 
