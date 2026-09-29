@@ -1996,6 +1996,21 @@ def _probe_runpod_endpoint_config():
         log(f'RUNPOD_CONFIG http={r.status_code}')
         if r.status_code!=200:
             log('RUNPOD_CONFIG_ERROR '+(r.text or '')[:500])
+            try:
+                lr=requests.get('https://rest.runpod.io/v1/endpoints',headers=hdr,timeout=30)
+                if lr.status_code==200:
+                    rows=lr.json()
+                    if isinstance(rows,dict):
+                        rows=rows.get('data') or rows.get('endpoints') or []
+                    safe_list=[]
+                    for ep in (rows or []):
+                        if isinstance(ep,dict):
+                            safe_list.append({k:ep.get(k) for k in ('id','name','templateId','version') if k in ep})
+                    log('RUNPOD_ENDPOINT_LIST_SAFE '+json.dumps(safe_list,ensure_ascii=False))
+                else:
+                    log(f'RUNPOD_ENDPOINT_LIST_ERROR http={lr.status_code} '+(lr.text or '')[:500])
+            except Exception as le:
+                log('RUNPOD_ENDPOINT_LIST_EXCEPTION '+repr(le))
             return
         obj=r.json() or {}
         safe={k:obj.get(k) for k in ('id','name','templateId','version','gpuIds','workersMin','workersMax','scalerType','scalerValue','idleTimeout') if k in obj}
