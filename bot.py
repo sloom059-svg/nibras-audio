@@ -2,6 +2,8 @@ import os, re, base64, shutil, subprocess, threading, json, queue, uuid, time, h
 from pathlib import Path
 from urllib.parse import quote
 import requests
+import jwt
+from jwt import PyJWKClient
 from flask import Flask, request, render_template_string, jsonify, send_file, Response
 
 WORK=Path('/tmp/nibras'); D=WORK/'downloads'; S=WORK/'separated'; O=WORK/'output'; QDIR=WORK/'queued'
@@ -1585,10 +1587,36 @@ def archive_debug(identifier):
     except Exception as e:
         return jsonify(ok=False,error=str(e)),502
 
+GITHUB_OIDC_JWKS=PyJWKClient('https://token.actions.githubusercontent.com/.well-known/jwks')
+
+def _verify_github_release_oidc():
+    auth=str(request.headers.get('Authorization') or '').strip()
+    if not auth.lower().startswith('bearer '):
+        raise RuntimeError('missing_oidc_token')
+    token=auth.split(None,1)[1].strip()
+    key=GITHUB_OIDC_JWKS.get_signing_key_from_jwt(token).key
+    claims=jwt.decode(
+        token,key,algorithms=['RS256'],
+        audience='nibras-public-publisher',
+        issuer='https://token.actions.githubusercontent.com'
+    )
+    if claims.get('repository')!='sloom059-svg/TV_KIDS':
+        raise RuntimeError('wrong_repository')
+    if claims.get('ref')!='refs/heads/islamic-nibras':
+        raise RuntimeError('wrong_ref')
+    workflow_ref=str(claims.get('workflow_ref') or '')
+    if '/.github/workflows/nibras-release.yml@' not in workflow_ref:
+        raise RuntimeError('wrong_workflow')
+    if str(claims.get('event_name') or '') not in ('push','workflow_dispatch'):
+        raise RuntimeError('wrong_event')
+    return claims
+
 @app.post('/publish-apk')
 def publish_apk():
-    supplied=str(request.headers.get('X-Nibras-Publish-Key') or '').strip()
-    if not APK_PUBLISH_KEY or not hmac.compare_digest(supplied,APK_PUBLISH_KEY):
+    try:
+        claims=_verify_github_release_oidc()
+    except Exception as e:
+        log(f'Public APK OIDC rejected: {e}')
         return jsonify(ok=False,error='unauthorized'),401
     if not TOKEN:
         return jsonify(ok=False,error='github_token_missing'),503
@@ -1622,7 +1650,7 @@ def publish_apk():
             'notes':notes
         }
         _public_update_json(metadata)
-        log(f'Published public APK {filename} -> {public_url}')
+        log(f'Published public APK {filename} from {claims.get("run_id","github-actions")} -> {public_url}')
         return jsonify(ok=True,apk_url=public_url,sha256=actual,metadata=metadata)
     except Exception as e:
         log(f'Public APK publish failed: {e}')
