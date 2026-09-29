@@ -1266,7 +1266,8 @@ function poll(id){
    if(j.status==='publishing'){p=82;label='اكتمل الفصل — جاري الرفع إلى GitHub...'}
    if(j.status==='done'){p=100;const mapName=j.map_target==='archive'?'archive-audio-map.json':(j.map_target==='dailymotion'?'dailymotion-audio-map.json':'audio-map.json');label=(j.result==='exists'?'موجود مسبقًا — تم التخطي ✅':'اكتملت المعالجة وتم تحديث '+mapName+' ✅');loadStorageUsage()}
    if(j.status==='failed'){p=100;label='فشل ❌'}
-   box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div><div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
+   const profile=j.clean_profile?('<div class="muted" style="margin-top:5px">طريقة التنقية: '+esc(j.clean_profile)+(j.clean_profile==='balanced-effects-v1'?' ✅':' ⚠️')+'</div>'):'';
+   box.innerHTML='<b>'+esc(j.id||j.filename)+'</b><div class="muted">'+esc(label)+'</div>'+profile+'<div class=bar><div class=fill style="width:'+p+'%"></div></div>'+(j.url?'<div style="margin-top:8px"><a style="color:#ffd982" href="'+esc(j.url)+'">فتح الصوت النظيف</a></div>':'')+(j.error?'<div class=err>'+esc(j.error)+'</div>':'');
    if(j.status!=='done'&&j.status!=='failed')setTimeout(()=>poll(id),2000);
  }).catch(()=>setTimeout(()=>poll(id),3000));
 }
@@ -1386,7 +1387,8 @@ def runpod_process_job(job_id):
         if b64:
             final=O/f'gpu_{job_id}_{job["id"]}.m4a'; final.write_bytes(base64.b64decode(b64))
             if final.stat().st_size<10000:raise RuntimeError('ملف RunPod الناتج غير مكتمل')
-            set_runpod_job(job_id,status='publishing',stage='storage')
+            clean_profile=(output.get('clean_profile') or 'legacy-vocals-only')
+            set_runpod_job(job_id,status='publishing',stage='storage',clean_profile=clean_profile)
             status,url=upload_series(final,job['id'],job['series'],job.get('map_target','youtube'))
             set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
             cleanup_gpu_source(job); log(f'gpu-clean {job_id} {job["id"]}: done {url}'); return
@@ -1656,11 +1658,12 @@ def gpu_result(job_id):
     if row.get('status')=='done':return jsonify(ok=True,already_done=True,url=row.get('url','')),200
     f=request.files.get('file')
     if not f:return jsonify(ok=False,error='file_required'),400
+    clean_profile=(request.form.get('clean_profile') or '').strip()[:80] or 'legacy-vocals-only'
     result_path=O/f'gpu_result_{job_id}_{row.get("id","audio")}.m4a'
     try:
         f.save(result_path)
         if result_path.stat().st_size<10000:return jsonify(ok=False,error='result_too_small'),400
-        set_runpod_job(job_id,status='publishing',stage='storage')
+        set_runpod_job(job_id,status='publishing',stage='storage',clean_profile=clean_profile)
         status,url=upload_series(result_path,row['id'],row['series'],row.get('map_target','youtube'))
         set_runpod_job(job_id,status='done',stage='done',result=status,url=url,error='',finished_at=time.time())
         cleanup_gpu_source(row);log(f'gpu-clean {job_id} {row["id"]}: callback published {url}')
