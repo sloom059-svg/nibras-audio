@@ -1952,6 +1952,27 @@ def _temporary_archive_probe():
         log('ARCHIVE_PROBE_ERROR '+repr(e))
 
 threading.Thread(target=_temporary_archive_probe,daemon=True,name='archive-probe').start()
+def _probe_runpod_endpoint_config():
+    if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
+        return
+    try:
+        hdr={'Authorization':f'Bearer {RUNPOD_API_KEY}','Content-Type':'application/json'}
+        r=requests.get(f'https://rest.runpod.io/v1/endpoints/{RUNPOD_ENDPOINT_ID}',headers=hdr,timeout=30)
+        log(f'RUNPOD_CONFIG http={r.status_code}')
+        if r.status_code!=200:
+            log('RUNPOD_CONFIG_ERROR '+(r.text or '')[:500])
+            return
+        obj=r.json() or {}
+        safe={k:obj.get(k) for k in ('id','name','templateId','version','gpuIds','workersMin','workersMax','scalerType','scalerValue','idleTimeout') if k in obj}
+        tpl=obj.get('template')
+        if isinstance(tpl,dict):
+            safe['template']={k:tpl.get(k) for k in ('id','name','imageName','containerDiskInGb','dockerStartCmd','dockerEntrypoint') if k in tpl}
+        log('RUNPOD_CONFIG_SAFE '+json.dumps(safe,ensure_ascii=False))
+    except Exception as e:
+        log('RUNPOD_CONFIG_EXCEPTION '+repr(e))
+
+threading.Thread(target=_probe_runpod_endpoint_config,daemon=True,name='runpod-config-probe').start()
+
 
 if __name__=='__main__':
     ensure_worker()
