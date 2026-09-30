@@ -506,9 +506,28 @@ def _derive_publish_id(value, filename, map_target='youtube', series=''):
     if (raw.startswith('ia_') and re.fullmatch(r'ia_[a-f0-9]{20}',raw,re.I)) or \
        (raw.startswith('iaf_') and re.fullmatch(r'iaf_[a-f0-9]{20}',raw,re.I)):
         return raw.lower()
+
     import unicodedata
     name=Path(filename or '').stem
-    name=re.sub(r'\s*\(\d+\)
+    name=re.sub(r'\s*\(\d+\)$','',name)
+    name=re.sub(r'(?i)_vocals_split_by_lalalai$','',name)
+    name=re.sub(r'(?i)_vocals$','',name)
+    name=unicodedata.normalize('NFC',name.strip())
+
+    # Canonicalize seasonal episode tokens so differently decorated upload
+    # filenames still resolve to the same Archive episode key.
+    season_episode=re.search(
+        r'(?i)(?:^|[^A-Za-z0-9])S\s*0*(\d{1,2})\s*[-_. ]*E\s*0*(\d{1,3})(?:[^A-Za-z0-9]|$)',
+        name
+    )
+    if season_episode:
+        season=int(season_episode.group(1))
+        episode=int(season_episode.group(2))
+        name=f'S{season:02d}E{episode:02d}'
+
+    if not name:return ''
+    folder=series_slug(series)
+    return 'iaf_'+hashlib.sha1((folder+'/'+name).encode('utf-8')).hexdigest()[:20]
 
 def series_slug(value):
     value=re.sub(r'[^A-Za-z0-9_-]','-',str(value or '').strip()).strip('-_').lower()
