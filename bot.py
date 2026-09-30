@@ -47,7 +47,7 @@ RUNPOD_JOBS_LOCK=threading.Lock()
 RUNPOD_QUEUE=queue.Queue()
 RUNPOD_WORKER_STARTED=False
 RUNPOD_WORKER_LOCK=threading.Lock()
-RUNPOD_AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus','.mp4','.webm'}
+RUNPOD_AUDIO_EXTS={'.m4a','.aac','.mp3','.wav','.flac','.ogg','.opus','.mp4','.webm','.ts','.mkv','.mov','.m4v'}
 
 HTML='''<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>نبراس</title>
 <style>body{font-family:Arial;background:#15171b;color:white;max-width:800px;margin:40px auto;padding:20px}.c{background:#22262c;padding:25px;border-radius:18px}pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap}</style>
@@ -1299,7 +1299,7 @@ small{color:#aaa}.ok{background:#163b2b;padding:12px;border-radius:10px;margin-t
   <option value="dailymotion">Dailymotion — dailymotion-audio-map.json</option>
   <option value="archive">Archive.org — archive-audio-map.json</option>
 </select>
-<label>الملفات</label><input type=file name=file multiple required accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,.mp4,.webm,.zip,audio/*,video/mp4,application/zip">
+<label>الملفات</label><input type=file name=file multiple required accept=".m4a,.aac,.mp3,.wav,.flac,.ogg,.opus,.mp4,.webm,.ts,.mkv,.mov,.m4v,.zip,audio/*,video/*,application/zip">
 <small>YouTube وDailymotion: يبدأ الاسم بمعرّف الفيديو. Archive.org: ارفع الملف باسم الحلقة الأصلي، وسيتم توليد مفتاح فريد تلقائيًا من اسم الفولدر + اسم الحلقة، لذلك تكرار S01E01 بين المسلسلات لا يسبب تعارضًا. يدعم ZIP أيضًا.</small>
 <button id=b type=submit>رفع وبدء إزالة الموسيقى</button>
 </form>
