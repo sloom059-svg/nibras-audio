@@ -498,8 +498,14 @@ def _derive_publish_id(value, filename, map_target='youtube', series=''):
         name=Path(filename or '').stem
         name=re.sub(r'^[=+]+','',name)
         name=re.sub(r'^\d+-','',name)
-        m=re.match(r'^(x[A-Za-z0-9]{5,})(?=(?:\s*\(\d+\))?(?:_|$|\s|-))',name,re.I)
-        return m.group(1) if m else ''
+        # Dailymotion downloaders commonly keep the video id at the end of
+        # the filename, e.g. "Cartoon videos_ E.K.E - x9facq4.m4a".
+        # Prefer the standard 7-character video id, then fall back to a
+        # bounded x-token for compatibility with older names.
+        matches=re.findall(r'(?i)(?<![A-Za-z0-9])(x[A-Za-z0-9]{6})(?![A-Za-z0-9])',name)
+        if matches:return matches[-1]
+        matches=re.findall(r'(?i)(?<![A-Za-z0-9])(x[A-Za-z0-9]{5,11})(?![A-Za-z0-9])',name)
+        return matches[-1] if matches else ''
 
     # Archive.org: namespace the key by the series folder so repeated names
     # like S01E01.mkv in different shows can never collide.
