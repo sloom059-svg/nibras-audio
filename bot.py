@@ -917,10 +917,39 @@ def cleanup_gpu_source(row):
     try:b2_delete_file(name)
     except Exception as e:log(f'cleanup temporary source failed {name}: {e}')
 
+
+def _cleanup_nageeb_khalfan_audio_once():
+    marker='nibras-maintenance/delete-nageeb-khalfan-all-v1.done'
+    targets=["processed-audio/nageebkhalfan/ia_a4d4f203c294676f763e.m4a","processed-audio/nageebkhalfan/ia_a2afc45f783411b84b84.m4a","processed-audio/nageebkhalfan/ia_ae17226c2ab3100b4341.m4a","processed-audio/nageebkhalfan/ia_fb62026902e1d393b5f2.m4a","processed-audio/nageebkhalfan/ia_d8c4c15eec7879d924a5.m4a","processed-audio/nageebkhalfan/ia_76089c57b68517235272.m4a","processed-audio/nageebkhalfan/ia_d1b11e7be0766008e17e.m4a","processed-audio/nageebkhalfan/ia_8f796586fe8bd871aa31.m4a","processed-audio/nageebkhalfan/ia_e961d655ac87fbee8391.m4a","processed-audio/nageebkhalfan/ia_d4851e038a4f13ad94f5.m4a","processed-audio/nageebkhalfan/ia_ae9e3e53401c11562149.m4a","processed-audio/nageebkhalfan/ia_a24e2c451d1df62929cf.m4a","processed-audio/nageebkhalfan/ia_9725b78091e0dd252137.m4a","processed-audio/nageebkhalfan/ia_6098d03b3e2268a12517.m4a","processed-audio/nageebkhalfan/ia_f839fb7974a8cecbe169.m4a","processed-audio/nageebkhalfan/ia_e6125ae1ad4404e37b72.m4a","processed-audio/nageebkhalfan/ia_067d47a13e592d200e6f.m4a","processed-audio/nageebkhalfan/ia_0aedf93e9d2877bfdecd.m4a","processed-audio/nageebkhalfan/ia_513f816606d9f1eab416.m4a","processed-audio/nageebkhalfan/ia_f98f42138b244413a28a.m4a","processed-audio/nageebkhalfan/ia_c5e2604e747763d1a2a4.m4a","processed-audio/nageebkhalfan/ia_a51721137a57d6904d0a.m4a","processed-audio/nageebkhalfan/ia_6174e2b863be25eb0520.m4a","processed-audio/nageebkhalfan/ia_986a37f755d4a5918b90.m4a","processed-audio/nageebkhalfan/ia_18ad6eeb300b40a32797.m4a","processed-audio/nageebkhalfan/ia_1d30b4d76d4990cd127b.m4a"]
+    try:
+        auth_data=b2_authorize()
+        if not auth_data:return
+        mr=requests.get(b2_file_url(marker,auth_data),timeout=20,headers={'Cache-Control':'no-cache'})
+        if mr.status_code==200:
+            return
+        results={}
+        for name in targets:
+            try:
+                results[name]=bool(b2_delete_file(name))
+            except Exception as e:
+                results[name]='error:'+repr(e)
+        remaining=[]
+        for name in targets:
+            rr=requests.get(b2_file_url(name,auth_data),timeout=20,headers={'Cache-Control':'no-cache'})
+            if rr.status_code!=404:
+                remaining.append(name)
+        log('NAGEEB_KHALFAN_FULL_CLEANUP '+json.dumps({'deleted':sum(1 for v in results.values() if v is True),'remaining':remaining,'results':results},ensure_ascii=False))
+        if not remaining:
+            b2_upload_bytes(b'done',marker,'text/plain')
+            log('NAGEEB_KHALFAN_FULL_CLEANUP complete')
+    except Exception as e:
+        log('NAGEEB_KHALFAN_FULL_CLEANUP exception '+repr(e))
+
 if B2_KEY_ID and B2_APPLICATION_KEY:
     try:
         auth_data=b2_authorize()
         log(f"Backblaze storage authorized for bucket {auth_data['_bucket_name']}")
+        _cleanup_nageeb_khalfan_audio_once()
     except Exception as e:
         log(f'Backblaze storage authorization failed: {e}')
 
