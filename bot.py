@@ -507,7 +507,13 @@ def _derive_publish_id(value, filename, map_target='youtube', series=''):
        (raw.startswith('iaf_') and re.fullmatch(r'iaf_[a-f0-9]{20}',raw,re.I)):
         return raw.lower()
     import unicodedata
-    name=Path(filename or '').stem
+    # Archive.org only: bind audio by series folder + archive base filename.
+    # Example: naqeeb-khalfan-123⧸S01E02.ts.m4a -> S01E02
+    raw_name=str(filename or '').strip()
+    raw_name=re.sub(r'[\\/⧸∕⁄]+','/',raw_name)
+    name=raw_name.rsplit('/',1)[-1]
+    name=Path(name).stem
+    name=re.sub(r'(?i)\.(?:ts|mp4|mkv|webm|mov|avi|m4v)$','',name)
     name=re.sub(r'\s*\(\d+\)$','',name)
     name=re.sub(r'(?i)_vocals_split_by_lalalai$','',name)
     name=re.sub(r'(?i)_vocals$','',name)
