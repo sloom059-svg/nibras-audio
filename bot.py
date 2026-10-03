@@ -26,6 +26,7 @@ RUNPOD_ENDPOINT_ID=os.getenv('RUNPOD_ENDPOINT_ID','').strip()
 B2_KEY_ID=os.getenv('B2_KEY_ID','').strip()
 B2_APPLICATION_KEY=os.getenv('B2_APPLICATION_KEY','').strip()
 B2_BUCKET_NAME=os.getenv('B2_BUCKET_NAME','').strip()
+CLIP_HISTORY_SECRET=os.getenv('CLIP_HISTORY_SECRET','').strip()
 B2_AUTH_CACHE=None
 B2_AUTH_LOCK=threading.Lock()
 B2_USAGE_CACHE={'at':0,'bytes':0,'files':0}
@@ -856,6 +857,152 @@ def b2_delete_file(file_name):
             raise RuntimeError(f'Backblaze delete failed HTTP {d.status_code}: {d.text[:300]}')
         removed=True
     return removed
+
+CLIP_HISTORY_PREFIX='clip-maker-history'
+
+def _clip_history_auth_ok():
+    return bool(CLIP_HISTORY_SECRET) and hmac.compare_digest(
+        request.headers.get('X-Clip-History-Key',''),
+        CLIP_HISTORY_SECRET
+    )
+
+def _clip_history_id(raw):
+    return re.sub(r'[^A-Za-z0-9_-]','',str(raw or ''))[:80]
+
+def _clip_history_meta_name(item_id):
+    return f'{CLIP_HISTORY_PREFIX}/meta/{item_id}.json'
+
+@app.post('/clip-history/ticket')
+def clip_history_ticket():
+    if not _clip_history_auth_ok():
+        return jsonify(error='unauthorized'),401
+    data=request.get_json(silent=True) or {}
+    item_id=_clip_history_id(data.get('id'))
+    if not item_id:
+        return jsonify(error='bad id'),400
+    try:
+        auth_data=b2_authorize()
+        if not auth_data:
+            raise RuntimeError('Backblaze غير مربوط')
+        file_name=f'{CLIP_HISTORY_PREFIX}/audio/{item_id}.mp3'
+        public_url=b2_file_url(file_name,auth_data)
+        head=requests.head(public_url,allow_redirects=True,timeout=30)
+        if head.status_code==200:
+            return jsonify(exists=True,file_name=file_name,public_url=public_url)
+        upload_info=_b2_get_upload_info(auth_data)
+        return jsonify(
+            exists=False,
+            file_name=file_name,
+            public_url=public_url,
+            upload_url=upload_info['uploadUrl'],
+            upload_token=upload_info['authorizationToken']
+        )
+    except Exception as e:
+        return jsonify(error=str(e)),500
+
+@app.post('/clip-history/register')
+def clip_history_register():
+    if not _clip_history_auth_ok():
+        return jsonify(error='unauthorized'),401
+    data=request.get_json(silent=True) or {}
+    item_id=_clip_history_id(data.get('id'))
+    if not item_id:
+        return jsonify(error='bad id'),400
+    try:
+        row={
+            'id':item_id,
+            'title':str(data.get('title') or 'مقطع صوتي')[:500],
+            'duration':float(data.get('duration') or 0),
+            'thumbnail':str(data.get('thumbnail') or '')[:2000],
+            'source_url':str(data.get('source_url') or '')[:4000],
+            'audio_url':str(data.get('audio_url') or '')[:4000],
+            'file_name':str(data.get('file_name') or '')[:1000],
+            'size':int(data.get('size') or 0),
+            'created_at':str(data.get('created_at') or time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())),
+        }
+        b2_upload_bytes(
+            json.dumps(row,ensure_ascii=False,separators=(',',':')).encode('utf-8'),
+            _clip_history_meta_name(item_id),
+            'application/json'
+        )
+        return jsonify(ok=True,item=row)
+    except Exception as e:
+        return jsonify(error=str(e)),500
+
+@app.get('/clip-history')
+def clip_history_list():
+    if not _clip_history_auth_ok():
+        return jsonify(error='unauthorized'),401
+    try:
+        auth_data=b2_authorize()
+        if not auth_data:
+            raise RuntimeError('Backblaze غير مربوط')
+        r=requests.post(
+            f"{auth_data['apiUrl'].rstrip('/')}/b2api/v2/b2_list_file_names",
+            headers={'Authorization':auth_data['authorizationToken']},
+            json={'bucketId':auth_data['_bucket_id'],'prefix':CLIP_HISTORY_PREFIX+'/meta/','maxFileCount':100},
+            timeout=30
+        )
+        if r.status_code!=200:
+            raise RuntimeError(f'Backblaze list failed HTTP {r.status_code}: {r.text[:300]}')
+        items=[]
+        for item in (r.json() or {}).get('files') or []:
+            name=item.get('fileName') or ''
+            if not name.endswith('.json'):
+                continue
+            rr=requests.get(b2_file_url(name,auth_data),timeout=20,headers={'Cache-Control':'no-cache'})
+            if rr.status_code==200:
+                try: items.append(rr.json())
+                except Exception: pass
+        items.sort(key=lambda x:str(x.get('created_at') or ''),reverse=True)
+        return jsonify(items=items[:20])
+    except Exception as e:
+        return jsonify(error=str(e)),500
+
+@app.get('/clip-history/<item_id>')
+def clip_history_get(item_id):
+    if not _clip_history_auth_ok():
+        return jsonify(error='unauthorized'),401
+    item_id=_clip_history_id(item_id)
+    if not item_id:
+        return jsonify(error='bad id'),400
+    try:
+        auth_data=b2_authorize()
+        r=requests.get(
+            b2_file_url(_clip_history_meta_name(item_id),auth_data),
+            timeout=20,
+            headers={'Cache-Control':'no-cache'}
+        )
+        if r.status_code==404:
+            return jsonify(error='not found'),404
+        if r.status_code!=200:
+            raise RuntimeError(f'Backblaze metadata HTTP {r.status_code}')
+        return jsonify(item=r.json())
+    except Exception as e:
+        return jsonify(error=str(e)),500
+
+@app.delete('/clip-history/<item_id>')
+def clip_history_delete(item_id):
+    if not _clip_history_auth_ok():
+        return jsonify(error='unauthorized'),401
+    item_id=_clip_history_id(item_id)
+    if not item_id:
+        return jsonify(error='bad id'),400
+    try:
+        auth_data=b2_authorize()
+        meta_name=_clip_history_meta_name(item_id)
+        item={}
+        rr=requests.get(b2_file_url(meta_name,auth_data),timeout=20,headers={'Cache-Control':'no-cache'})
+        if rr.status_code==200:
+            try: item=rr.json()
+            except Exception: item={}
+        audio_name=str(item.get('file_name') or f'{CLIP_HISTORY_PREFIX}/audio/{item_id}.mp3')
+        audio_removed=b2_delete_file(audio_name)
+        meta_removed=b2_delete_file(meta_name)
+        return jsonify(ok=True,audio_removed=bool(audio_removed),meta_removed=bool(meta_removed))
+    except Exception as e:
+        return jsonify(error=str(e)),500
+
 
 
 def _cleanup_legacy_tom_jerry_tests_once():
